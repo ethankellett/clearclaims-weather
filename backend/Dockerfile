@@ -26,8 +26,8 @@ RUN mkdir -p /app/fonts \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# --- Application code ---------------------------------------------------------
-COPY hail_core.py pipeline.py app.py ./
+# --- Application code (all engine + app modules) -----------------------------
+COPY *.py ./
 
 ENV FONT_DIR=/app/fonts \
     PYTHONUNBUFFERED=1 \
