@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+import gc
 import gzip
 import math
 import shutil
@@ -456,11 +457,14 @@ def max_mesh_over_files(grib_paths, lat, lon, pad_deg=0.30):
     acc_lats = acc_lons = acc = None
     for p in grib_paths:
         la, lo, me = read_mesh_grib(p)
-        la, lo, me = crop_to_bbox(la, lo, me, lat, lon, pad_deg)
+        cla, clo, cme = crop_to_bbox(la, lo, me, lat, lon, pad_deg)
+        del la, lo, me            # free the full CONUS grid immediately
         if acc is None:
-            acc_lats, acc_lons, acc = la, lo, me
+            acc_lats, acc_lons, acc = cla, clo, cme
         else:
-            acc = np.fmax(acc, me)   # fmax ignores NaNs sensibly
+            acc = np.fmax(acc, cme)   # fmax ignores NaNs sensibly
+            del cme
+        gc.collect()              # keep peak memory low (free-tier friendly)
     if acc is None:
         raise ValueError("No radar files could be read for this date.")
     return acc_lats, acc_lons, acc

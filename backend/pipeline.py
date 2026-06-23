@@ -23,7 +23,7 @@ def _coord_str(lat: float, lon: float) -> str:
     return f"{abs(lat):.4f}° {ns}, {abs(lon):.4f}° {ew}"
 
 
-def _fetch_grib_paths(utc_start, utc_end, tmpdir, date_of_loss=None, max_files=5):
+def _fetch_grib_paths(utc_start, utc_end, tmpdir, date_of_loss=None, max_files=1):
     """Download the relevant MRMS MESH files (AWS first, then IEM archive).
 
     Returns (paths, keys, source_label). Kept as its own function so tests can
