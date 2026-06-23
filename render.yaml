@@ -1,0 +1,37 @@
+# Render Blueprint — deploy the ClearClaims hail API with one click.
+# In Render: New ▸ Blueprint ▸ point at the repo containing this file.
+services:
+  - type: web
+    name: clearclaims-hail
+    runtime: docker
+    rootDir: backend            # the Dockerfile lives in backend/
+    plan: free                  # $0 test tier (sleeps when idle, no disk). Upgrade to
+                                # "starter" + a disk for production persistence.
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: API_KEY            # auto-generated; copy it into Netlify's BACKEND_KEY
+        generateValue: true
+      - key: ADMIN_KEY          # auto-generated; used for the history page
+        generateValue: true
+      - key: ALLOWED_ORIGINS    # tighten to your domain(s) once live
+        value: "*"
+      - key: DEFAULT_THRESHOLD_IN
+        value: "0.75"
+      - key: RATE_PER_MIN
+        value: "12"
+      - key: REPORTS_DIR        # ephemeral on free tier (resets when the service sleeps)
+        value: "/tmp/cc_reports"
+      - key: PUBLIC_BASE_URL    # set to this service's URL after first deploy
+        sync: false
+      # Optional — set these in the Render dashboard when ready:
+      # - key: ACCESS_CODE          # shared access-code gate
+      #     sync: false
+      # - key: TURNSTILE_SECRET     # Cloudflare Turnstile captcha
+      #     sync: false
+      # - key: CLERK_ISSUER         # per-user logins (Clerk issuer URL)
+      #     sync: false
+      # - key: RESEND_API_KEY       # auto-email via Resend
+      #     sync: false
+      # - key: EMAIL_FROM           # e.g. "ClearClaims Co. <reports@clearclaimsco.co>"
+      #     sync: false
