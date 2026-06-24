@@ -23,12 +23,24 @@ def _coord_str(lat: float, lon: float) -> str:
     return f"{abs(lat):.4f}° {ns}, {abs(lon):.4f}° {ew}"
 
 
-def _fetch_grib_paths(utc_start, utc_end, tmpdir, date_of_loss=None, max_files=1):
+def _fetch_grib_paths(utc_start, utc_end, tmpdir, date_of_loss=None, max_files=None):
     """Download the relevant MRMS MESH files (AWS first, then IEM archive).
 
     Returns (paths, keys, source_label). Kept as its own function so tests can
     monkeypatch it with a local synthetic file (no network needed).
+
+    `max_files` controls how many MESH files are combined (cell-wise max) for the
+    local day. MESH_Max_1440min is a running 24-hour maximum, so the single file
+    at day-end already captures the day's peak; reading a few more guards against
+    a missing/corrupt end-of-day file and timestamp edge cases. Memory peak is
+    ~one CONUS grid regardless (each file is cropped and freed immediately), so on
+    the 2GB tier we default to 3. Override with the MESH_MAX_FILES env var.
     """
+    if max_files is None:
+        try:
+            max_files = max(1, int(os.environ.get("MESH_MAX_FILES", "3")))
+        except ValueError:
+            max_files = 3
     paths, source, keys = hc.fetch_mesh_paths(utc_start, utc_end, date_of_loss,
                                               tmpdir, max_files=max_files)
     if not paths:
