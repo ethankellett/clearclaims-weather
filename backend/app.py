@@ -100,7 +100,11 @@ def verify_turnstile(token: str | None, remote_ip: str | None) -> bool:
 
 
 def _check_gate(req, remote_ip: str | None):
-    """Enforce whichever gates are configured (access code and/or captcha)."""
+    """Enforce whichever gates are configured (honeypot, access code and/or captcha)."""
+    # Honeypot: the "website" field is hidden from real users; only bots fill it.
+    # If it arrives with anything in it, silently reject as a bot submission.
+    if (getattr(req, "website", "") or "").strip():
+        raise HTTPException(status_code=400, detail="Your submission could not be processed.")
     if ACCESS_CODE:
         if (req.access_code or "").strip() != ACCESS_CODE:
             raise HTTPException(status_code=403, detail="Incorrect or missing access code.")
@@ -120,6 +124,7 @@ class GenerateRequest(BaseModel):
     claim_ref: str = ""
     access_code: str | None = None     # gate (optional)
     turnstile_token: str | None = None  # gate (optional)
+    website: str | None = None         # honeypot: must stay empty (bots fill it)
     email_to: str | None = None        # auto-email the report link here (optional)
 
 
