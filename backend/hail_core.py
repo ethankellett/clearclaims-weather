@@ -1,5 +1,5 @@
 # =============================================================================
-#  ClearClaims Co. — Hail Verification Report
+#  Clear Claims Co. — Hail Verification Report
 #  CORE LOGIC  (this is the "engine" of the notebook)
 # =============================================================================
 #
@@ -825,7 +825,7 @@ BRAND = {
     "green":    "#28a678",
     "coral":    "#d94f3d",
     "ice":      "#b8cce0",
-    "name":     "ClearClaims Co.",
+    "name":     "Clear Claims Co.",
     "tagline":  "Fairness in Every Claim",
     "contact":  "clearclaimsco.co",
 }
@@ -993,8 +993,8 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
     disclaimer = data.get("disclaimerText",
         "This is a radar-derived estimate, not a guarantee of hail size or property damage, "
         "and is not a substitute for a physical inspection by a qualified professional. "
-        "ClearClaims Co. makes no warranty and accepts no liability arising from use of this "
-        "report. Source data is U.S. NOAA public-domain radar. ClearClaims Co. is an "
+        "Clear Claims Co. makes no warranty and accepts no liability arising from use of this "
+        "report. Source data is U.S. NOAA public-domain radar. Clear Claims Co. is an "
         "independent provider and is <strong style=\"color:#5a6b7e;\">not affiliated with "
         "Cotality or CoreLogic</strong>.")
 
@@ -1039,7 +1039,7 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
     <div style="display:flex; align-items:center; gap:14px;">
       {_LOGO_SVG}
       <div>
-        <div style="font-family:'DM Serif Display',serif; font-size:25px; line-height:1; color:#fff; white-space:nowrap;">Clear<span style="color:#4a9af5;">Claims</span> <span style="font-family:'Outfit'; font-size:12px; font-weight:500; color:#8aa0b8; letter-spacing:.03em;">Co.</span></div>
+        <div style="font-family:'DM Serif Display',serif; font-size:25px; line-height:1; color:#fff; white-space:nowrap;">Clear <span style="color:#4a9af5;">Claims</span> <span style="font-family:'Outfit'; font-size:12px; font-weight:500; color:#8aa0b8; letter-spacing:.03em;">Co.</span></div>
         <div style="font-family:'DM Serif Display',serif; font-style:italic; font-size:12px; color:#8aa0b8; margin-top:3px;">Fairness in every claim</div>
       </div>
     </div>
@@ -1215,8 +1215,8 @@ def build_pdf(out_pdf: str, r: ReportInputs, fonts: dict, logo_path: str | None 
     wm_y = H - 0.50 * inch
     c.setFont(fonts["head"], 22)
     c.setFillColor(HexColor("#ffffff"))
-    c.drawString(text_x, wm_y, "Clear")
-    x2 = text_x + stringWidth("Clear", fonts["head"], 22)
+    c.drawString(text_x, wm_y, "Clear ")
+    x2 = text_x + stringWidth("Clear ", fonts["head"], 22)
     c.setFillColor(bright)
     c.drawString(x2, wm_y, "Claims")
     x3 = x2 + stringWidth("Claims", fonts["head"], 22)
@@ -1370,7 +1370,7 @@ def build_pdf(out_pdf: str, r: ReportInputs, fonts: dict, logo_path: str | None 
         "DISCLAIMER: This is a radar-derived ESTIMATE provided for informational "
         "purposes only. It is NOT a physical inspection, NOT a guarantee that hail "
         "damage did or did not occur, and NOT a substitute for an on-site assessment "
-        "by a qualified adjuster or inspector. ClearClaims Co. makes no warranty and "
+        "by a qualified adjuster or inspector. Clear Claims Co. makes no warranty and "
         "accepts no liability arising from use of this report.")
     y = para("Liability Disclaimer", disc_txt, y)
 

@@ -2,7 +2,7 @@
 #  Auto-email the finished report.
 #
 #  Primary: Resend (https://resend.com) — simplest API, free tier. Set:
-#     RESEND_API_KEY, EMAIL_FROM   (e.g. "ClearClaims Co. <reports@clearclaimsco.co>")
+#     RESEND_API_KEY, EMAIL_FROM   (e.g. "Clear Claims Co. <reports@clearclaimsco.co>")
 #  Optional: a BCC archive copy via EMAIL_BCC.
 #
 #  Fallback: plain SMTP (e.g. Google Workspace) if RESEND_API_KEY is not set but
@@ -39,7 +39,7 @@ def build_email_html(meta: dict, report_url: str) -> str:
     return f"""\
 <div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:auto;color:#1f2c3d;">
   <div style="background:#06101f;color:#fff;padding:18px 22px;border-radius:8px 8px 0 0;">
-    <div style="font-size:20px;font-weight:bold;">Clear<span style="color:#4a9af5;">Claims</span> Co.</div>
+    <div style="font-size:20px;font-weight:bold;">Clear <span style="color:#4a9af5;">Claims</span> Co.</div>
     <div style="font-size:12px;color:#8aa0b8;font-style:italic;">Fairness in every claim</div>
   </div>
   <div style="border:1px solid #d9e4f0;border-top:0;border-radius:0 0 8px 8px;padding:22px;">

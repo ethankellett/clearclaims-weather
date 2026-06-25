@@ -82,7 +82,7 @@ def build_report_html_generic(data: dict, font_dir: str | None = None) -> str:
     <div style="display:flex; align-items:center; gap:14px;">
       {hc._LOGO_SVG}
       <div>
-        <div style="font-family:'DM Serif Display',serif; font-size:25px; line-height:1; color:#fff; white-space:nowrap;">Clear<span style="color:#4a9af5;">Claims</span> <span style="font-family:'Outfit'; font-size:12px; font-weight:500; color:#8aa0b8; letter-spacing:.03em;">Co.</span></div>
+        <div style="font-family:'DM Serif Display',serif; font-size:25px; line-height:1; color:#fff; white-space:nowrap;">Clear <span style="color:#4a9af5;">Claims</span> <span style="font-family:'Outfit'; font-size:12px; font-weight:500; color:#8aa0b8; letter-spacing:.03em;">Co.</span></div>
         <div style="font-family:'DM Serif Display',serif; font-style:italic; font-size:12px; color:#8aa0b8; margin-top:3px;">Fairness in every claim</div>
       </div>
     </div>

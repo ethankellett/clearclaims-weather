@@ -346,9 +346,9 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
             "This is an estimate based on the nearest available measurements and reports, "
             "for informational purposes only. It is NOT a physical inspection, NOT a "
             "guarantee of wind damage, and not a substitute for an on-site assessment. "
-            "ClearClaims Co. makes no warranty and accepts no liability arising from use "
+            "Clear Claims Co. makes no warranty and accepts no liability arising from use "
             "of this report. Source data is U.S. NOAA public-domain observations. "
-            "ClearClaims Co. is an independent provider and is <strong style=\"color:#5a6b7e;\">"
+            "Clear Claims Co. is an independent provider and is <strong style=\"color:#5a6b7e;\">"
             "not affiliated with Cotality or CoreLogic</strong>."),
         "_detected": detected, "_peak_mph": peak, "_confidence": conf,
     }

@@ -220,7 +220,7 @@ def generate(req: GenerateRequest, request: Request,
         pdf_bytes = storage.get_report_pdf(out["share_id"])
         ok, detail = emailer.send_report_email(
             req.email_to.strip(), m, report_url, pdf_bytes,
-            filename=f"ClearClaims_Hail_Report_{m.get('report_id','report')}.pdf")
+            filename=f"Clear_Claims_Hail_Report_{m.get('report_id','report')}.pdf")
         emailed = ok
         if not ok:
             email_error = detail
@@ -251,7 +251,7 @@ def get_report(share_id: str):
         raise HTTPException(status_code=404, detail="Report not found.")
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition":
-                             f'inline; filename="ClearClaims_Hail_Report_{share_id[:8]}.pdf"'})
+                             f'inline; filename="Clear_Claims_Hail_Report_{share_id[:8]}.pdf"'})
 
 
 @app.get("/reports")

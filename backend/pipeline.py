@@ -133,7 +133,7 @@ def generate_report(
         "corroborationLine": corrob_line,
     }
     html = hc.build_report_html(data, font_dir=font_dir)
-    pdf_path = os.path.join(out_dir, f"ClearClaims_Hail_Report_{report_id}.pdf")
+    pdf_path = os.path.join(out_dir, f"Clear_Claims_Hail_Report_{report_id}.pdf")
     hc.render_pdf_weasyprint(html, pdf_path)
 
     return {

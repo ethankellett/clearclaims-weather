@@ -68,7 +68,7 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
             date_of_loss=date_of_loss, contact_url=contact_url, contact_city=contact_city,
             claim_ref=claim_ref, threshold_mph=thr, station_gusts=stations,
             reports=reports, map_data_uri=hc.png_to_data_uri(mp))
-        pdf = os.path.join(out_dir, f"ClearClaims_Wind_Report_{rid}.pdf")
+        pdf = os.path.join(out_dir, f"Clear_Claims_Wind_Report_{rid}.pdf")
         wc.render(data, pdf, font_dir=fd)
         peak = data["_peak_mph"]
         return {
@@ -95,7 +95,7 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
         date_of_loss=date_of_loss, contact_url=contact_url, contact_city=contact_city,
         claim_ref=claim_ref, threshold_in=thr, depth_mm=depth_mm, swe_mm=swe_mm,
         station_reports=stations, map_data_uri=hc.png_to_data_uri(mp))
-    pdf = os.path.join(out_dir, f"ClearClaims_Snow_Report_{rid}.pdf")
+    pdf = os.path.join(out_dir, f"Clear_Claims_Snow_Report_{rid}.pdf")
     sc.render(data, pdf, font_dir=fd)
     return {
         "peril": "snow", "pdf_path": pdf, "report_id": rid,

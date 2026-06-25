@@ -286,9 +286,9 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
             "This is an estimate for informational purposes only. It is NOT a physical "
             "inspection, NOT a structural load determination, and not a substitute for an "
             "on-site assessment by a qualified professional. Roof-load figures are derived "
-            "estimates and must not be used as engineering values. ClearClaims Co. makes no "
+            "estimates and must not be used as engineering values. Clear Claims Co. makes no "
             "warranty and accepts no liability arising from use of this report. Source data "
-            "is U.S. NOAA public-domain. ClearClaims Co. is an independent provider and is "
+            "is U.S. NOAA public-domain. Clear Claims Co. is an independent provider and is "
             "<strong style=\"color:#5a6b7e;\">not affiliated with Cotality or CoreLogic</strong>."),
         "_detected": detected, "_depth_in": round(depth_in, 1),
         "_load_psf": load_psf, "_confidence": conf,
