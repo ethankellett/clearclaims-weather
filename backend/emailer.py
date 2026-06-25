@@ -17,6 +17,7 @@ import base64
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
+EMAIL_REPLY_TO = os.environ.get("EMAIL_REPLY_TO", "").strip()
 EMAIL_BCC = os.environ.get("EMAIL_BCC", "").strip()
 SMTP_HOST = os.environ.get("EMAIL_SMTP_HOST", "").strip()
 SMTP_PORT = int(os.environ.get("EMAIL_SMTP_PORT", "587"))
@@ -83,6 +84,8 @@ def _send_resend(to, subject, html, pdf_bytes, filename):
     payload = {"from": EMAIL_FROM, "to": [to], "subject": subject, "html": html}
     if EMAIL_BCC:
         payload["bcc"] = [EMAIL_BCC]
+    if EMAIL_REPLY_TO:
+        payload["reply_to"] = EMAIL_REPLY_TO
     if pdf_bytes:
         payload["attachments"] = [{
             "filename": filename,
@@ -104,6 +107,8 @@ def _send_smtp(to, subject, html, pdf_bytes, filename):
     msg["To"] = to
     if EMAIL_BCC:
         msg["Bcc"] = EMAIL_BCC
+    if EMAIL_REPLY_TO:
+        msg["Reply-To"] = EMAIL_REPLY_TO
     msg["Subject"] = subject
     msg.set_content("Your hail report is ready. Open the link in an HTML-capable client.")
     msg.add_alternative(html, subtype="html")
