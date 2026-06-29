@@ -948,6 +948,203 @@ def _font_face_css(font_dir: str | None) -> str:
     return "\n".join(css)
 
 
+# --------------------------------------------------------------------------- #
+#  Revised report template (design refresh, 2026-06).  Uses str.format — every
+#  literal CSS brace is doubled; single-brace tokens are the fill-ins. Fed by
+#  the existing pipeline `data` dict (keys mapped in build_report_html below).
+# --------------------------------------------------------------------------- #
+_HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  {font_face}
+  @page {{ size: 8.5in 11in; margin: 0; }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  html, body {{ font-family: 'Outfit', Helvetica, Arial, sans-serif; color: #152742; }}
+  /* Fixed one-page height + clip = the report can never spill to a 2nd page. */
+  .page {{ width: 8.5in; height: 11in; overflow: hidden; display: flex; flex-direction: column; }}
+
+  .hdr {{ background: #06101f; padding: 16px 40px; display: flex; align-items: center; justify-content: space-between; }}
+  .brand {{ display: flex; align-items: center; gap: 14px; }}
+  .brand svg.logo {{ width: 42px; height: 49px; display: block; }}
+  .wm {{ font-family: 'DM Serif Display', serif; font-size: 25px; line-height: 1; color: #f0f4f8; white-space: nowrap; }}
+  .wm .b {{ color: #4a9af5; }}
+  .wm .co {{ font-size: 15px; color: #8fa3b8; margin-left: 3px; }}
+  .tag {{ font-family: 'DM Serif Display', serif; font-style: italic; font-size: 13px; color: #8fa3b8; margin-top: 5px; }}
+  .hdr-right {{ text-align: right; }}
+  .hdr-right .site {{ font-size: 13px; font-weight: 600; color: #4a9af5; }}
+  .hdr-right .loc {{ font-size: 13px; color: #b8cce0; margin-top: 4px; }}
+
+  .titleband {{ background: #0b1626; padding: 14px 40px; display: flex; align-items: baseline; justify-content: space-between; }}
+  .titleband h1 {{ font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 27px; color: #f0f4f8; letter-spacing: .2px; }}
+  .titleband .kick {{ font-size: 12px; font-weight: 500; letter-spacing: .28em; text-transform: uppercase; color: #5a6b7e; }}
+
+  .body {{ flex: 1; padding: 10px 40px 9px; display: flex; flex-direction: column; }}
+
+  .meta {{ display: grid; grid-template-columns: 1fr 1fr 1fr; border: 1px solid #dde6f0; border-radius: 9px; overflow: hidden; }}
+  .meta .cell {{ padding: 8px 18px; border-right: 1px solid #e7eef6; border-bottom: 1px solid #e7eef6; }}
+  .meta .cell.c3 {{ border-right: none; }}
+  .meta .cell.span2 {{ grid-column: span 2; }}
+  .meta .cell.row-last {{ border-bottom: none; }}
+  .meta .lbl {{ font-size: 9px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #5a6b7e; }}
+  .meta .val {{ font-size: 15.5px; font-weight: 600; color: #152742; margin-top: 5px; }}
+
+  .keyfind {{ margin-top: 10px; display: flex; align-items: stretch; gap: 18px;
+    background: {kf_bg}; border: 1px solid {kf_bd}; border-left: 5px solid {kf_accent};
+    border-radius: 10px; padding: 12px 20px; }}
+  .kf-icon {{ flex: 0 0 auto; width: 54px; height: 54px; border-radius: 50%; background: {kf_accent};
+    display: flex; align-items: center; justify-content: center; align-self: center; }}
+  .kf-icon svg {{ width: 30px; height: 30px; display: block; }}
+  .kf-main {{ flex: 1; }}
+  .kf-lbl {{ font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: {kf_accent}; }}
+  .keyfind h2 {{ font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 24px; line-height: 1.12; color: #06101f; margin-top: 4px; }}
+  .keyfind h2 .fig {{ color: {kf_accent}; }}
+  .kf-sub {{ font-size: 13px; color: #4a5d76; line-height: 1.5; margin-top: 8px; }}
+  .kf-sub b {{ color: #152742; font-weight: 600; }}
+  .kf-badge {{ flex: 0 0 auto; align-self: center; background: {kf_accent}; color: #fff; font-size: 13px; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase; padding: 12px 18px; border-radius: 8px; white-space: nowrap; }}
+
+  .seclbl {{ font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #152742; }}
+
+  .duo {{ margin-top: 11px; display: grid; grid-template-columns: 0.92fr 1.18fr; gap: 26px; align-items: start; }}
+
+  table {{ width: 100%; border-collapse: collapse; margin-top: 9px; border-radius: 8px; overflow: hidden; }}
+  thead th {{ background: #0e2138; color: #f0f4f8; text-align: left; font-size: 9.5px; font-weight: 600;
+    letter-spacing: .08em; text-transform: uppercase; padding: 10px 14px; }}
+  thead th.num {{ text-align: right; }}
+  tbody td {{ padding: 7px 14px; font-size: 13px; color: #152742; border-bottom: 1px solid #e7eef6; }}
+  tbody td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+  tbody tr:nth-child(even) {{ background: #f4f8fc; }}
+  tbody tr.hot {{ background: {kf_bg}; }}
+  tbody tr.hot td {{ font-weight: 700; }}
+  tbody tr.hot td:first-child {{ box-shadow: inset 3px 0 0 {kf_accent}; }}
+  tbody tr.hot td.num {{ color: {kf_accent}; }}
+  tbody tr:last-child td {{ border-bottom: none; }}
+  .cap {{ font-size: 10px; color: #8a99ab; line-height: 1.45; margin-top: 8px; }}
+
+  .map-wrap img {{ width: 100%; height: 163px; object-fit: contain; object-position: center; display: block;
+    border: 1px solid #dde6f0; border-radius: 8px; background: #ffffff; }}
+
+  .conf {{ margin-top: 9px; border: 1px solid #dde6f0; border-radius: 10px; padding: 11px 20px;
+    display: flex; align-items: center; gap: 20px; }}
+  .conf .chip {{ flex: 0 0 auto; color: #fff; font-size: 11px; font-weight: 700; letter-spacing: .1em;
+    text-transform: uppercase; padding: 11px 16px; border-radius: 8px; }}
+  .conf .conf-body .seclbl {{ margin-bottom: 6px; }}
+  .conf .conf-body p {{ font-size: 12.5px; color: #4a5d76; line-height: 1.5; }}
+  .conf .conf-body p + p {{ margin-top: 5px; }}
+
+  .method {{ margin-top: 8px; }}
+  .method p {{ font-size: 12px; color: #4a5d76; line-height: 1.55; margin-top: 7px; }}
+
+  .disc {{ margin-top: 9px; background: #f0f4f8; border-radius: 8px; padding: 10px 18px; }}
+  .disc .dl {{ font-size: 9px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #8a99ab; margin-bottom: 5px; }}
+  .disc p {{ font-size: 9.5px; color: #8a99ab; line-height: 1.5; }}
+  .disc b, .disc strong {{ color: #5a6b7e; }}
+
+  .spacer {{ flex: 1; }}
+
+  .foot {{ background: #06101f; padding: 13px 40px; display: flex; align-items: center; justify-content: space-between; }}
+  .foot span {{ font-size: 10px; color: #8fa3b8; letter-spacing: .03em; }}
+  .foot .conf-tag {{ color: #4a9af5; font-weight: 700; letter-spacing: .18em; }}
+</style>
+</head>
+<body>
+  <div class="page">
+
+    <div class="hdr">
+      <div class="brand">
+        {logo}
+        <div>
+          <div class="wm">Clear <span class="b">Claims</span> <span class="co">Co.</span></div>
+          <div class="tag">Fairness in every claim</div>
+        </div>
+      </div>
+      <div class="hdr-right">
+        <div class="site">{contact_url}</div>
+        <div class="loc">{contact_city}</div>
+      </div>
+    </div>
+
+    <div class="titleband">
+      <h1>{report_title}</h1>
+      <div class="kick">{band_label}</div>
+    </div>
+
+    <div class="body">
+
+      <div class="meta">
+        <div class="cell"><div class="lbl">Report ID</div><div class="val">{report_id}</div></div>
+        <div class="cell"><div class="lbl">Date Generated</div><div class="val">{report_date}</div></div>
+        <div class="cell c3"><div class="lbl">Date of Loss</div><div class="val">{date_of_loss}</div></div>
+        <div class="cell span2"><div class="lbl">Property Address</div><div class="val">{address}</div></div>
+        <div class="cell c3"><div class="lbl">Claim / Reference</div><div class="val">{claim_ref}</div></div>
+        <div class="cell row-last"><div class="lbl">Coordinates</div><div class="val">{coords}</div></div>
+        <div class="cell span2 c3 row-last"></div>
+      </div>
+
+      <div class="keyfind">
+        <div class="kf-icon">{icon}</div>
+        <div class="kf-main">
+          <div class="kf-lbl">Key Finding</div>
+          <h2>Hail of {threshold} or greater <span class="fig">{verb}</span> at this property.</h2>
+          <div class="kf-sub">Maximum estimated hail at the property location on the date of loss was <b>{max_phrase}</b> &mdash; {thr} the {threshold} damage threshold.</div>
+        </div>
+        <div class="kf-badge">{badge}</div>
+      </div>
+
+      <div class="duo">
+        <div class="size-wrap">
+          <div class="seclbl">Estimated Maximum Hail Size</div>
+          <table>
+            <thead><tr><th>Location</th><th class="num">In</th><th class="num">MM</th></tr></thead>
+            <tbody>{est_rows}</tbody>
+          </table>
+          <div class="cap">Values are peak radar-estimated diameters within each radius during storm passage.</div>
+        </div>
+        <div class="map-wrap">
+          <div class="seclbl">Hail Footprint</div>
+          <div style="margin-top:9px;"><img src="{footprint_src}" alt="Estimated hail footprint" /></div>
+          <div class="cap">{footprint_caption}</div>
+        </div>
+      </div>
+
+      <div class="conf">
+        <div class="chip" style="background:{chip_bg};">{chip_text}</div>
+        <div class="conf-body">
+          <div class="seclbl">Corroboration &amp; Confidence</div>
+          <p>{corrob}</p>
+          {nearby_html}
+        </div>
+      </div>
+
+      <div class="method">
+        <div class="seclbl">Methodology</div>
+        <p>{methodology}</p>
+      </div>
+
+      <div class="disc">
+        <div class="dl">Disclaimer</div>
+        <p>{disclaimer}</p>
+      </div>
+
+      <div class="spacer"></div>
+    </div>
+
+    <div class="foot">
+      <span>Report {report_id}</span>
+      <span class="conf-tag">CONFIDENTIAL</span>
+      <span>Page 1 of 1 &middot; Generated {report_date}</span>
+    </div>
+
+  </div>
+</body>
+</html>"""
+
+
 def build_report_html(data: dict, font_dir: str | None = None) -> str:
     """Build the complete, self-contained HTML for one report.
 
@@ -998,145 +1195,56 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
         "independent provider and is <strong style=\"color:#5a6b7e;\">not affiliated with "
         "Cotality or CoreLogic</strong>.")
 
-    # Optional confidence + corroboration block (shown only if provided).
-    conf_level = data.get("confidenceLevel")
-    if conf_level:
-        conf_color = data.get("confidenceColor", "#7d8ea1")
-        conf_note = data.get("confidenceNote", "")
-        corrob = data.get("corroborationLine", "")
-        conf_block = f"""
-    <div style="margin-top:10px; border:1px solid #e2e9f1; border-radius:4px; padding:10px 14px; display:flex; gap:14px; align-items:flex-start;">
-      <div style="flex:none; background:{conf_color}; color:#fff; font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; padding:6px 11px; border-radius:3px; white-space:nowrap;">{conf_level} Confidence</div>
-      <div style="flex:1;">
-        <div style="font-size:9.5px; letter-spacing:.12em; text-transform:uppercase; color:#0c1a30; font-weight:700; margin-bottom:3px;">Corroboration &amp; Confidence</div>
-        <div style="font-size:10.5px; color:#46566a; line-height:1.5;">{conf_note}</div>
-        <div style="font-size:10px; color:#5a6b7e; line-height:1.5; margin-top:4px;">{corrob}</div>
-      </div>
-    </div>"""
-    else:
-        conf_block = ""
+    # --- new-design (2026-06 refresh) field mapping -------------------------
+    max_phrase = f'{ap["in"]}″ ({ap["mm"]} mm)'
 
-    return f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<style>
-  {font_face}
-  @page {{ size: 8.5in 11in; margin: 0; }}
-  * {{ box-sizing:border-box; }}
-  html, body {{ margin:0; padding:0; background:#fff; }}
-  body {{ font-family:'Outfit', sans-serif; }}
-  /* Fixed one-page height + clip = the report can NEVER spill to a 2nd page,
-     regardless of which fonts the renderer substitutes. */
-  .page {{ width:816px; height:1056px; background:#ffffff; display:flex; flex-direction:column; overflow:hidden; }}
-</style></head>
-<body>
-<div class="page">
+    _est = [("At Property", ap, True), ("Within 1 mile", m1, False),
+            ("Within 3 miles", m3, False), ("Within 5 miles", m5, False)]
+    est_rows = "".join(
+        '<tr class="{c}"><td>{l}</td><td class="num">{i}</td><td class="num">{m}</td></tr>'.format(
+            c="hot" if hot else "", l=label, i=d["in"], m=d["mm"])
+        for label, d, hot in _est)
 
-  <!-- Header band -->
-  <div style="background:#06101f; padding:26px 44px 22px; display:flex; align-items:flex-start; justify-content:space-between;">
-    <div style="display:flex; align-items:center; gap:14px;">
-      {_LOGO_SVG}
-      <div>
-        <div style="font-family:'DM Serif Display',serif; font-size:25px; line-height:1; color:#fff; white-space:nowrap;">Clear <span style="color:#4a9af5;">Claims</span> <span style="font-family:'Outfit'; font-size:12px; font-weight:500; color:#8aa0b8; letter-spacing:.03em;">Co.</span></div>
-        <div style="font-family:'DM Serif Display',serif; font-style:italic; font-size:12px; color:#8aa0b8; margin-top:3px;">Fairness in every claim</div>
-      </div>
-    </div>
-    <div style="text-align:right; font-size:11px; line-height:1.6; color:#9fb2c7; padding-top:3px;">
-      <div style="color:#4a9af5; font-weight:600; letter-spacing:.04em;">{data["contactUrl"]}</div>
-      <div>{data["contactCity"]}</div>
-    </div>
-  </div>
-  <div style="background:#0c1a30; padding:11px 44px; border-top:1px solid #1c2c44; display:flex; align-items:center; justify-content:space-between;">
-    <div style="font-family:'DM Serif Display',serif; font-size:20px; color:#fff; letter-spacing:.01em;">{data["reportTitle"]}</div>
-    <div style="font-size:10px; letter-spacing:.16em; text-transform:uppercase; color:#6e84a0;">{data["bandLabel"]}</div>
-  </div>
+    chip_bg = data.get("confidenceColor", "#28a678")
+    _conf_level = data.get("confidenceLevel") or ""
+    chip_text = f"{_conf_level} Confidence" if _conf_level else "Confidence"
+    corrob = data.get("confidenceNote") or (
+        "Radar-estimated hail is corroborated by independent ground reports "
+        "within the search area.")
+    _nearby = data.get("corroborationLine") or ""
+    nearby_html = f"<p>{_nearby}</p>" if _nearby else ""
 
-  <!-- Body -->
-  <div style="padding:16px 44px 0; flex:1; display:flex; flex-direction:column;">
-
-    <!-- Report details -->
-    <div style="border:1px solid #d9e4f0; border-radius:3px; display:grid; grid-template-columns:1fr 1fr 1fr;">
-      <div style="padding:9px 16px; border-right:1px solid #e7eef6; border-bottom:1px solid #e7eef6;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Report ID</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px;">{data["reportId"]}</div></div>
-      <div style="padding:9px 16px; border-right:1px solid #e7eef6; border-bottom:1px solid #e7eef6;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Date Generated</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px;">{data["dateGenerated"]}</div></div>
-      <div style="padding:9px 16px; border-bottom:1px solid #e7eef6;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Date of Loss</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px;">{data["dateOfLoss"]}</div></div>
-      <div style="padding:9px 16px; border-right:1px solid #e7eef6; grid-column:span 2;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Property Address</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px;">{data["propertyAddress"]}</div></div>
-      <div style="padding:9px 16px;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Claim / Reference</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px;">{data["claimRef"]}</div></div>
-      <div style="padding:9px 16px; border-top:1px solid #e7eef6; grid-column:span 3;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Coordinates</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px; font-variant-numeric:tabular-nums;">{data["coordinates"]}</div></div>
-    </div>
-
-    <!-- KEY FINDING callout -->
-    <div style="margin-top:12px; background:{t['tint']}; border:1px solid {t['tintBorder']}; border-left:6px solid {t['main']}; border-radius:3px; padding:13px 18px; display:flex; align-items:center; gap:16px;">
-      <div style="flex:none; width:52px; height:52px; border-radius:50%; background:{t['main']}; display:flex; align-items:center; justify-content:center;">{icon}</div>
-      <div style="flex:1;">
-        <div style="font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:{t['deep']}; font-weight:700;">Key Finding</div>
-        <div style="font-family:'DM Serif Display',serif; font-size:24px; color:#06101f; line-height:1.08; margin-top:2px;">Hail of {threshold_label} or greater <span style="color:{t['dark']};">{finding_verb}</span> at this property.</div>
-        <div style="font-size:11.5px; color:#54616f; margin-top:4px;">Maximum estimated hail at the property location on the date of loss was <strong style="color:#06101f;">{max_value}</strong> — {threshold_word} the {threshold_label} damage threshold.</div>
-      </div>
-      <div style="flex:none; background:{t['main']}; color:#fff; font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; padding:8px 14px; border-radius:3px; text-align:center; white-space:nowrap;">{status_text}</div>
-    </div>
-
-    <!-- Two columns: table + map -->
-    <div style="display:flex; gap:20px; margin-top:12px;">
-      <div style="flex:none; width:300px;">
-        <div style="font-size:9.5px; letter-spacing:.12em; text-transform:uppercase; color:#0c1a30; font-weight:700; margin-bottom:8px;">Estimated Maximum Hail Size</div>
-        <table style="width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums;">
-          <thead><tr style="background:#0c1a30;">
-            <th style="text-align:left; padding:8px 12px; font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:#9fb2c7; font-weight:600;">Location</th>
-            <th style="text-align:right; padding:8px 10px; font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:#9fb2c7; font-weight:600;">in</th>
-            <th style="text-align:right; padding:8px 12px; font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:#9fb2c7; font-weight:600;">mm</th>
-          </tr></thead>
-          <tbody>
-            <tr style="background:{t['rowTint']};"><td style="padding:9px 12px; font-size:12.5px; color:#06101f; font-weight:700; border-bottom:1px solid #e7eef6;">At Property</td><td style="padding:9px 10px; text-align:right; font-size:13px; color:{t['dark']}; font-weight:700; border-bottom:1px solid #e7eef6;">{ap['in']}</td><td style="padding:9px 12px; text-align:right; font-size:12px; color:#5a6b7e; border-bottom:1px solid #e7eef6;">{ap['mm']}</td></tr>
-            <tr><td style="padding:9px 12px; font-size:12px; color:#0c1a30; border-bottom:1px solid #eef3f8;">Within 1 mile</td><td style="padding:9px 10px; text-align:right; font-size:13px; color:#06101f; font-weight:600; border-bottom:1px solid #eef3f8;">{m1['in']}</td><td style="padding:9px 12px; text-align:right; font-size:12px; color:#5a6b7e; border-bottom:1px solid #eef3f8;">{m1['mm']}</td></tr>
-            <tr style="background:#f7fafd;"><td style="padding:9px 12px; font-size:12px; color:#0c1a30; border-bottom:1px solid #eef3f8;">Within 3 miles</td><td style="padding:9px 10px; text-align:right; font-size:13px; color:#06101f; font-weight:600; border-bottom:1px solid #eef3f8;">{m3['in']}</td><td style="padding:9px 12px; text-align:right; font-size:12px; color:#5a6b7e; border-bottom:1px solid #eef3f8;">{m3['mm']}</td></tr>
-            <tr><td style="padding:9px 12px; font-size:12px; color:#0c1a30;">Within 5 miles</td><td style="padding:9px 10px; text-align:right; font-size:13px; color:#06101f; font-weight:600;">{m5['in']}</td><td style="padding:9px 12px; text-align:right; font-size:12px; color:#5a6b7e;">{m5['mm']}</td></tr>
-          </tbody>
-        </table>
-        <div style="font-size:9px; color:#90a0b2; margin-top:7px; line-height:1.4;">Values are peak radar-estimated diameters within each radius during storm passage.</div>
-      </div>
-
-      <div style="flex:1;">
-        <div style="font-size:9.5px; letter-spacing:.12em; text-transform:uppercase; color:#0c1a30; font-weight:700; margin-bottom:8px;">Hail Footprint</div>
-        <div style="border:1px solid #c4d2e2; border-radius:3px; overflow:hidden;">
-          {map_block}
-          <div style="display:flex; align-items:center; gap:0; padding:7px 10px; border-top:1px solid #e7eef6; background:#fff;">
-            <span style="font-size:8.5px; color:#7d8ea1; margin-right:8px; font-weight:600;">SIZE</span>
-            <span style="flex:1; height:9px; border-radius:2px; background:linear-gradient(90deg,#28a678,#7cc36a,#e6a117,#e07a2e,#d94f3d);"></span>
-            <span style="font-size:8.5px; color:#7d8ea1; margin-left:8px;">0.5″</span>
-            <span style="font-size:8.5px; color:#7d8ea1; margin-left:6px;">2.5″+</span>
-          </div>
-        </div>
-        <div style="font-size:9px; color:#90a0b2; margin-top:7px; line-height:1.4;">{data["mapCaption"]}</div>
-      </div>
-    </div>
-
-    {conf_block}
-
-    <!-- Methodology -->
-    <div style="margin-top:10px; padding-top:10px; border-top:1px solid #e7eef6;">
-      <div style="font-size:9.5px; letter-spacing:.12em; text-transform:uppercase; color:#0c1a30; font-weight:700; margin-bottom:5px;">Methodology</div>
-      <div style="font-size:9.7px; color:#46566a; line-height:1.45;">{methodology}</div>
-    </div>
-
-    <!-- Disclaimer -->
-    <div style="margin-top:10px; padding-top:0; margin-bottom:20px;">
-      <div style="background:#f0f4f8; border-radius:3px; padding:11px 14px;">
-        <div style="font-size:8px; letter-spacing:.12em; text-transform:uppercase; color:#8a99ab; font-weight:700; margin-bottom:4px;">Disclaimer</div>
-        <div style="font-size:8.5px; color:#7a8a9c; line-height:1.5;">{disclaimer}</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Footer -->
-  <div style="background:#06101f; padding:9px 44px; display:flex; align-items:center; justify-content:space-between; font-size:8.5px; color:#7d8ea1; letter-spacing:.04em;">
-    <span>Report {data["reportId"]}</span>
-    <span style="color:#4a9af5; font-weight:600; letter-spacing:.1em; text-transform:uppercase;">Confidential</span>
-    <span>Page 1 of 1 · Generated {data["dateGenerated"]}</span>
-  </div>
-</div>
-</body></html>"""
+    return _HAIL_REPORT_TEMPLATE.format(
+        font_face=font_face,
+        logo=_LOGO_SVG,
+        contact_url=data.get("contactUrl", "clearclaimsco.co"),
+        contact_city=data.get("contactCity", "support@clearclaimsco.co"),
+        report_title=data.get("reportTitle", "Radar-Based Hail Estimate Report"),
+        band_label=data.get("bandLabel", "Weather Analysis"),
+        report_id=data["reportId"],
+        report_date=data["dateGenerated"],
+        date_of_loss=data["dateOfLoss"],
+        address=data["propertyAddress"],
+        claim_ref=data["claimRef"],
+        coords=data["coordinates"],
+        kf_accent=t["main"], kf_bg=t["tint"], kf_bd=t["tintBorder"],
+        icon=icon,
+        threshold=threshold_label,
+        verb=finding_verb,
+        thr=threshold_word,
+        badge=status_text,
+        max_phrase=max_phrase,
+        est_rows=est_rows,
+        footprint_src=data.get("mapDataUri", ""),
+        footprint_caption=data.get(
+            "mapCaption", "Estimated hail footprint &mdash; NOAA MRMS MESH."),
+        chip_bg=chip_bg,
+        chip_text=chip_text,
+        corrob=corrob,
+        nearby_html=nearby_html,
+        methodology=methodology,
+        disclaimer=disclaimer,
+    )
 
 
 def render_pdf_weasyprint(html: str, out_pdf: str) -> str:
