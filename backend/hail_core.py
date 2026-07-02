@@ -986,12 +986,13 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .body {{ flex: 1; padding: 10px 40px 9px; display: flex; flex-direction: column; }}
 
   .meta {{ display: grid; grid-template-columns: 1fr 1fr 1fr; border: 1px solid #dde6f0; border-radius: 9px; overflow: hidden; }}
-  .meta .cell {{ padding: 8px 18px; border-right: 1px solid #e7eef6; border-bottom: 1px solid #e7eef6; }}
+  .meta .cell {{ padding: 8px 18px; border-right: 1px solid #e7eef6; border-bottom: 1px solid #e7eef6; min-width: 0; }}
   .meta .cell.c3 {{ border-right: none; }}
   .meta .cell.span2 {{ grid-column: span 2; }}
   .meta .cell.row-last {{ border-bottom: none; }}
   .meta .lbl {{ font-size: 9px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #5a6b7e; }}
   .meta .val {{ font-size: 15.5px; font-weight: 600; color: #152742; margin-top: 5px; }}
+    .val {{ overflow-wrap: anywhere; }}
 
   .keyfind {{ margin-top: 10px; display: flex; align-items: stretch; gap: 18px;
     background: {kf_bg}; border: 1px solid {kf_bd}; border-left: 5px solid {kf_accent};
@@ -1103,7 +1104,7 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
             <thead><tr><th>Location</th><th class="num">In</th><th class="num">MM</th></tr></thead>
             <tbody>{est_rows}</tbody>
           </table>
-          <div class="cap">Values are peak radar-estimated diameters within each radius during storm passage.</div>
+          <div class="cap">Values are peak radar-estimated diameters within each radius during storm passage. At Property is the peak within &frac12; mile of the geocoded location (radar grid &asymp;1 km).</div>
         </div>
         <div class="map-wrap">
           <div class="seclbl">Hail Footprint</div>
@@ -1143,6 +1144,34 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   </div>
 </body>
 </html>"""
+
+
+def soft_wrap_html(text, limit=58):
+    """Break long text into <=limit-char lines joined with <br>.
+
+    WeasyPrint 69's CSS grid sizes columns by their content, so one long
+    unwrapped line (e.g. a very long property address) pushes sibling cells
+    right off the page — CSS min-width/overflow-wrap does not save it. Breaking
+    the line server-side keeps every renderer honest. Splits at spaces; hard-
+    splits any single token longer than the limit.
+    """
+    words = str(text or "").split()
+    lines, cur = [], ""
+    for w in words:
+        while len(w) > limit:
+            if cur:
+                lines.append(cur)
+                cur = ""
+            lines.append(w[:limit])
+            w = w[limit:]
+        if cur and len(cur) + 1 + len(w) > limit:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = (cur + " " + w).strip()
+    if cur:
+        lines.append(cur)
+    return "<br>".join(lines)
 
 
 def build_report_html(data: dict, font_dir: str | None = None) -> str:
@@ -1224,8 +1253,8 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
         report_id=data["reportId"],
         report_date=data["dateGenerated"],
         date_of_loss=data["dateOfLoss"],
-        address=data["propertyAddress"],
-        claim_ref=data["claimRef"],
+        address=soft_wrap_html(data["propertyAddress"]),
+        claim_ref=soft_wrap_html(data["claimRef"], 26),
         coords=data["coordinates"],
         kf_accent=t["main"], kf_bg=t["tint"], kf_bd=t["tintBorder"],
         icon=icon,

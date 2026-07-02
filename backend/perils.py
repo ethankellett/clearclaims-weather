@@ -39,12 +39,13 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
             contact_url=contact_url, contact_city=contact_city, font_dir=fd,
             out_dir=out_dir, _grib_paths=_hail_grib_paths)
         rings = r["rings"]
+        ap_in = r.get("at_property_in", rings["point"]["in"])
         return {
             "peril": "hail", "pdf_path": r["pdf_path"], "report_id": r["report_id"],
             "detected": r["detected"], "confidence": r["confidence"],
             "data_source": r.get("data_source"), "n_reports": len(r.get("reports") or []),
-            "headline": f'Max hail {rings["point"]["in"]:.2f}" at property',
-            "metrics": {"at_property_in": round(rings["point"]["in"], 2),
+            "headline": f'Max hail {ap_in:.2f}" at property',
+            "metrics": {"at_property_in": round(ap_in, 2),
                         "mile1_in": round(rings[1]["in"], 2),
                         "mile3_in": round(rings[3]["in"], 2),
                         "mile5_in": round(rings[5]["in"], 2)},
@@ -82,10 +83,29 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
 
     # snow
     tmp = tempfile.mkdtemp()
+    # SNODAS grids are an early-morning (~06Z) snapshot, so snow that falls
+    # DURING the date of loss only shows up in the NEXT day's file. Sample both
+    # days (next day best-effort) and keep whichever shows the deeper snow at
+    # the property, so daytime/evening storms aren't under-reported.
+    def _nz(v):
+        return 0.0 if v is None or (isinstance(v, float) and v != v) else float(v)
+
     arr_depth = sc.fetch_snodas_product(date_of_loss, sc.SNODAS_DEPTH, tmp)
     arr_swe = sc.fetch_snodas_product(date_of_loss, sc.SNODAS_SWE, tmp)
     depth_mm = sc.sample_snodas(arr_depth, loc["lat"], loc["lon"], sc.SNODAS, agg="point")
     swe_mm = sc.sample_snodas(arr_swe, loc["lat"], loc["lon"], sc.SNODAS, agg="point")
+    next_day = date_of_loss + dt.timedelta(days=1)
+    if next_day <= dt.date.today():
+        try:
+            arr_depth2 = sc.fetch_snodas_product(next_day, sc.SNODAS_DEPTH, tmp)
+            arr_swe2 = sc.fetch_snodas_product(next_day, sc.SNODAS_SWE, tmp)
+            depth2 = sc.sample_snodas(arr_depth2, loc["lat"], loc["lon"], sc.SNODAS, agg="point")
+            swe2 = sc.sample_snodas(arr_swe2, loc["lat"], loc["lon"], sc.SNODAS, agg="point")
+            if _nz(depth2) > _nz(depth_mm):
+                arr_depth, arr_swe = arr_depth2, arr_swe2
+                depth_mm, swe_mm = depth2, swe2
+        except Exception:
+            pass  # next-day grid unavailable — the day-of grid still stands
     stations = sc.fetch_station_snowfall(loc["lat"], loc["lon"], date_of_loss, radius_miles=25.0)
     mp = os.path.join(out_dir, "snow_map.png")
     sc.make_snow_map(arr_depth, loc["lat"], loc["lon"], sc.SNODAS, mp, brand=hc.BRAND)

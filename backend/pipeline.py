@@ -92,9 +92,16 @@ def generate_report(
 
     # 4. read + sample (At Property and 1/3/5-mile maxima)
     lats, lons, mesh_mm = hc.max_mesh_over_files(grib_paths, loc["lat"], loc["lon"], pad_deg=0.30)
-    rings = hc.sample_rings(lats, lons, mesh_mm, loc["lat"], loc["lon"], rings=(1, 3, 5))
+    rings = hc.sample_rings(lats, lons, mesh_mm, loc["lat"], loc["lon"], rings=(0.5, 1, 3, 5))
     point_in = rings["point"]["in"]
-    detected = bool(point_in >= threshold_in)
+    # "At Property" basis: the peak MESH within 0.5 mile of the geocoded point,
+    # not just the single nearest grid cell. The MRMS grid is ~1 km and street
+    # geocoding is routinely off by a few hundred feet, so nearest-cell-only can
+    # miss a storm core that clipped the property (false negatives). Half a mile
+    # covers grid resolution + geocode wobble without borrowing a neighbor's storm.
+    ap = rings[0.5] if rings[0.5]["in"] >= point_in else rings["point"]
+    at_property_in = ap["in"]
+    detected = bool(at_property_in >= threshold_in)
 
     # 4b. ground-truth corroboration + confidence (best-effort; never fatal)
     try:
@@ -102,7 +109,7 @@ def generate_report(
                                          date_of_loss, radius_miles=12.0)
     except Exception:
         reports = []
-    confidence = hc.assess_confidence(point_in, rings[1]["in"], reports, threshold_in, source)
+    confidence = hc.assess_confidence(at_property_in, rings[1]["in"], reports, threshold_in, source)
     corrob_line = hc.corroboration_line(reports, 12.0)
 
     # 5. footprint map
@@ -123,7 +130,7 @@ def generate_report(
         "contactUrl": contact_url, "contactCity": contact_city,
         "bandLabel": band_label, "reportTitle": report_title,
         "detected": detected, "thresholdInches": threshold_in,
-        "results": {"atProperty": fmt(rings["point"]), "mile1": fmt(rings[1]),
+        "results": {"atProperty": fmt(ap), "mile1": fmt(rings[1]),
                     "mile3": fmt(rings[3]), "mile5": fmt(rings[5])},
         "mapDataUri": hc.png_to_data_uri(map_path),
         "mapCaption": f"Estimated hail footprint — NOAA MRMS MESH, {date_of_loss:%B %d, %Y}.",
@@ -141,6 +148,7 @@ def generate_report(
         "map_path": map_path,
         "report_id": report_id,
         "detected": detected,
+        "at_property_in": at_property_in,
         "rings": rings,
         "location": loc,
         "tz_name": tz_name,

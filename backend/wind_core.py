@@ -69,11 +69,15 @@ def fetch_nearest_stations(lat, lon, n=3, timeout=30):
     return parse_station_geojson(r.json(), lat, lon, n=n)
 
 
-def parse_asos_gust_csv(text: str):
+def parse_asos_gust_csv(text: str, utc_start=None, utc_end=None):
     """Max gust (mph) from an IEM ASOS CSV. Gust column is in knots → convert.
 
     Handles IEM's '#'-comment header lines and a 'gust' (knots) column; ignores
-    'M'/missing values.
+    'M'/missing values. When `utc_start`/`utc_end` are given and the CSV has a
+    'valid' timestamp column, only readings inside [utc_start, utc_end) count —
+    this pins the peak gust to the exact local calendar day of loss instead of
+    whole UTC days (which could pick up a gust from the previous local evening
+    or miss the evening of the loss date).
     """
     import csv
     import io
@@ -82,10 +86,13 @@ def parse_asos_gust_csv(text: str):
         return None
     reader = csv.DictReader(io.StringIO("\n".join(lines)))
     gust_col = None
+    valid_col = None
     for name in (reader.fieldnames or []):
-        if name and "gust" in name.lower():
+        low = (name or "").strip().lower()
+        if gust_col is None and "gust" in low:
             gust_col = name
-            break
+        if valid_col is None and low == "valid":
+            valid_col = name
     if not gust_col:
         return None
     peak_kt = None
@@ -97,6 +104,18 @@ def parse_asos_gust_csv(text: str):
             kt = float(v)
         except ValueError:
             continue
+        if valid_col is not None and utc_start is not None and utc_end is not None:
+            ts_raw = (row.get(valid_col) or "").strip()
+            ts = None
+            for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    ts = dt.datetime.strptime(ts_raw, fmt).replace(tzinfo=dt.timezone.utc)
+                    break
+                except ValueError:
+                    pass
+            # Unparseable timestamp: keep the reading (fail open, never lose data).
+            if ts is not None and not (utc_start <= ts < utc_end):
+                continue
         if peak_kt is None or kt > peak_kt:
             peak_kt = kt
     return round(peak_kt * KT_TO_MPH, 1) if peak_kt is not None else None
@@ -105,16 +124,20 @@ def parse_asos_gust_csv(text: str):
 def fetch_station_peak_gust(station_id, utc_start, utc_end, timeout=45):
     """Peak gust (mph) at one ASOS station over the window, via the IEM ASOS service."""
     import requests
+    # Request one extra day on each side of the UTC window (IEM's end date is
+    # treated as exclusive) and let the parser filter readings to the exact
+    # [utc_start, utc_end) window using each row's 'valid' timestamp.
+    end_day = (utc_end + dt.timedelta(days=1)).date()
     params = {
         "station": station_id, "data": "gust", "tz": "UTC",
         "year1": utc_start.year, "month1": utc_start.month, "day1": utc_start.day,
-        "year2": utc_end.year, "month2": utc_end.month, "day2": utc_end.day,
+        "year2": end_day.year, "month2": end_day.month, "day2": end_day.day,
         "format": "onlycomma", "missing": "M", "latlon": "no",
     }
     r = requests.get("https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
                      params=params, timeout=timeout)
     r.raise_for_status()
-    return parse_asos_gust_csv(r.text)
+    return parse_asos_gust_csv(r.text, utc_start, utc_end)
 
 
 def gather_station_gusts(lat, lon, utc_start, utc_end, n=3):

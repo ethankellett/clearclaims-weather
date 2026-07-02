@@ -183,6 +183,8 @@ def _run(req: GenerateRequest, user: str = "") -> dict:
     }
     storage.put_report(share_id, pdf_bytes, meta)
     _dedupe[dedupe_key] = share_id
+    while len(_dedupe) > 1000:   # keep the in-memory dedupe map from growing forever
+        _dedupe.pop(next(iter(_dedupe)))
     return {"share_id": share_id, "meta": storage.get_report_meta(share_id) or meta}
 
 
@@ -218,9 +220,10 @@ def generate(req: GenerateRequest, request: Request,
     report_url = _share_url(out["share_id"])
     if req.email_to and emailer.email_enabled():
         pdf_bytes = storage.get_report_pdf(out["share_id"])
+        peril_name = (m.get("peril") or "hail").title()
         ok, detail = emailer.send_report_email(
             req.email_to.strip(), m, report_url, pdf_bytes,
-            filename=f"Clear_Claims_Hail_Report_{m.get('report_id','report')}.pdf")
+            filename=f"Clear_Claims_{peril_name}_Report_{m.get('report_id','report')}.pdf")
         emailed = ok
         if not ok:
             email_error = detail
@@ -249,9 +252,11 @@ def get_report(share_id: str):
     pdf = storage.get_report_pdf(share_id)
     if pdf is None:
         raise HTTPException(status_code=404, detail="Report not found.")
+    meta = storage.get_report_meta(share_id) or {}
+    peril_name = (meta.get("peril") or "hail").title()
+    fname = f"Clear_Claims_{peril_name}_Report_{meta.get('report_id') or share_id[:8]}.pdf"
     return Response(content=pdf, media_type="application/pdf",
-                    headers={"Content-Disposition":
-                             f'inline; filename="Clear_Claims_Hail_Report_{share_id[:8]}.pdf"'})
+                    headers={"Content-Disposition": f'inline; filename="{fname}"'})
 
 
 @app.get("/reports")
