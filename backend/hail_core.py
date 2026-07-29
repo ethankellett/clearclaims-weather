@@ -998,11 +998,11 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
     background: {kf_bg}; border: 1px solid {kf_bd}; border-left: 5px solid {kf_accent};
     border-radius: 10px; padding: 13px 20px; }}
   .kf-cell {{ display: table-cell; vertical-align: middle; }}
-  .kf-icon-cell {{ width: 54px; }}
+  .kf-icon-cell {{ width: 58px; min-width: 58px; }}
   .kf-icon {{ width: 54px; height: 54px; border-radius: 50%; background: {kf_accent};
     display: flex; align-items: center; justify-content: center; }}
   .kf-icon svg {{ width: 30px; height: 30px; display: block; }}
-  .kf-main {{ width: 100%; padding: 0 18px; }}
+  .kf-main {{ padding: 0 18px; }}
   .kf-lbl {{ font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: {kf_accent}; }}
   .keyfind h2 {{ font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 22px; line-height: 1.12; color: #06101f; margin-top: 4px; }}
   .keyfind h2 .fig {{ color: {kf_accent}; }}
