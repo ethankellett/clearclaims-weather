@@ -966,9 +966,9 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   html, body {{ font-family: 'Outfit', Helvetica, Arial, sans-serif; color: #152742; }}
   /* Fixed one-page height + clip = the report can never spill to a 2nd page. */
-  .page {{ width: 8.5in; height: 11in; overflow: hidden; display: flex; flex-direction: column; }}
+  .page {{ width: 8.5in; height: 11in; overflow: hidden; display: block; position: relative; }}
 
-  .hdr {{ background: #06101f; padding: 16px 40px; display: flex; align-items: center; justify-content: space-between; }}
+  .hdr {{ background: #06101f; padding: 13px 40px; display: flex; align-items: center; justify-content: space-between; }}
   .brand {{ display: flex; align-items: center; gap: 14px; }}
   .brand svg.logo {{ width: 42px; height: 49px; display: block; }}
   .wm {{ font-family: 'DM Serif Display', serif; font-size: 25px; line-height: 1; color: #f0f4f8; white-space: nowrap; }}
@@ -979,14 +979,14 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .hdr-right .site {{ font-size: 13px; font-weight: 600; color: #4a9af5; }}
   .hdr-right .loc {{ font-size: 13px; color: #b8cce0; margin-top: 4px; }}
 
-  .titleband {{ background: #0b1626; padding: 14px 40px; display: flex; align-items: baseline; justify-content: space-between; }}
+  .titleband {{ background: #0b1626; padding: 11px 40px; display: flex; align-items: baseline; justify-content: space-between; }}
   .titleband h1 {{ font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 27px; color: #f0f4f8; letter-spacing: .2px; }}
   .titleband .kick {{ font-size: 12px; font-weight: 500; letter-spacing: .28em; text-transform: uppercase; color: #5a6b7e; }}
 
-  .body {{ flex: 1; padding: 10px 40px 9px; display: flex; flex-direction: column; }}
+  .body {{ display: block; padding: 8px 40px 6px; }}
 
   .meta {{ display: grid; grid-template-columns: 1fr 1fr 1fr; border: 1px solid #dde6f0; border-radius: 9px; overflow: hidden; }}
-  .meta .cell {{ padding: 8px 18px; border-right: 1px solid #e7eef6; border-bottom: 1px solid #e7eef6; min-width: 0; }}
+  .meta .cell {{ padding: 5px 18px; border-right: 1px solid #e7eef6; border-bottom: 1px solid #e7eef6; min-width: 0; }}
   .meta .cell.c3 {{ border-right: none; }}
   .meta .cell.span2 {{ grid-column: span 2; }}
   .meta .cell.row-last {{ border-bottom: none; }}
@@ -994,30 +994,33 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .meta .val {{ font-size: 15.5px; font-weight: 600; color: #152742; margin-top: 5px; }}
     .val {{ overflow-wrap: anywhere; }}
 
-  .keyfind {{ margin-top: 10px; display: flex; align-items: stretch; gap: 18px;
+  .keyfind {{ margin-top: 8px; display: table; width: 100%; box-sizing: border-box;
     background: {kf_bg}; border: 1px solid {kf_bd}; border-left: 5px solid {kf_accent};
-    border-radius: 10px; padding: 12px 20px; }}
-  .kf-icon {{ flex: 0 0 auto; width: 54px; height: 54px; border-radius: 50%; background: {kf_accent};
-    display: flex; align-items: center; justify-content: center; align-self: center; }}
+    border-radius: 10px; padding: 9px 20px; }}
+  .kf-cell {{ display: table-cell; vertical-align: middle; }}
+  .kf-icon-cell {{ width: 54px; }}
+  .kf-icon {{ width: 54px; height: 54px; border-radius: 50%; background: {kf_accent};
+    display: flex; align-items: center; justify-content: center; }}
   .kf-icon svg {{ width: 30px; height: 30px; display: block; }}
-  .kf-main {{ flex: 1; }}
+  .kf-main {{ width: 100%; padding: 0 18px; }}
   .kf-lbl {{ font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: {kf_accent}; }}
-  .keyfind h2 {{ font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 24px; line-height: 1.12; color: #06101f; margin-top: 4px; }}
+  .keyfind h2 {{ font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 22px; line-height: 1.12; color: #06101f; margin-top: 4px; }}
   .keyfind h2 .fig {{ color: {kf_accent}; }}
   .kf-sub {{ font-size: 13px; color: #4a5d76; line-height: 1.5; margin-top: 8px; }}
   .kf-sub b {{ color: #152742; font-weight: 600; }}
-  .kf-badge {{ flex: 0 0 auto; align-self: center; background: {kf_accent}; color: #fff; font-size: 13px; font-weight: 700;
+  .kf-badge-cell {{ white-space: nowrap; }}
+  .kf-badge {{ display: inline-block; background: {kf_accent}; color: #fff; font-size: 13px; font-weight: 700;
     letter-spacing: .08em; text-transform: uppercase; padding: 12px 18px; border-radius: 8px; white-space: nowrap; }}
 
   .seclbl {{ font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #152742; }}
 
-  .duo {{ margin-top: 11px; display: grid; grid-template-columns: 0.92fr 1.18fr; gap: 26px; align-items: start; }}
+  .duo {{ margin-top: 8px; display: grid; grid-template-columns: 0.92fr 1.18fr; gap: 26px; align-items: start; }}
 
   table {{ width: 100%; border-collapse: collapse; margin-top: 9px; border-radius: 8px; overflow: hidden; }}
   thead th {{ background: #0e2138; color: #f0f4f8; text-align: left; font-size: 9.5px; font-weight: 600;
     letter-spacing: .08em; text-transform: uppercase; padding: 10px 14px; }}
   thead th.num {{ text-align: right; }}
-  tbody td {{ padding: 7px 14px; font-size: 13px; color: #152742; border-bottom: 1px solid #e7eef6; }}
+  tbody td {{ padding: 6px 14px; font-size: 13px; color: #152742; border-bottom: 1px solid #e7eef6; }}
   tbody td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
   tbody tr:nth-child(even) {{ background: #f4f8fc; }}
   tbody tr.hot {{ background: {kf_bg}; }}
@@ -1030,7 +1033,7 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .map-wrap img {{ width: 100%; height: 163px; object-fit: contain; object-position: center; display: block;
     border: 1px solid #dde6f0; border-radius: 8px; background: #ffffff; }}
 
-  .conf {{ margin-top: 9px; border: 1px solid #dde6f0; border-radius: 10px; padding: 11px 20px;
+  .conf {{ margin-top: 8px; border: 1px solid #dde6f0; border-radius: 10px; padding: 9px 20px;
     display: flex; align-items: center; gap: 20px; }}
   .conf .chip {{ flex: 0 0 auto; color: #fff; font-size: 11px; font-weight: 700; letter-spacing: .1em;
     text-transform: uppercase; padding: 11px 16px; border-radius: 8px; }}
@@ -1038,17 +1041,17 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .conf .conf-body p {{ font-size: 12.5px; color: #4a5d76; line-height: 1.5; }}
   .conf .conf-body p + p {{ margin-top: 5px; }}
 
-  .method {{ margin-top: 8px; }}
-  .method p {{ font-size: 12px; color: #4a5d76; line-height: 1.55; margin-top: 7px; }}
+  .method {{ margin-top: 6px; }}
+  .method p {{ font-size: 12px; color: #4a5d76; line-height: 1.5; margin-top: 5px; }}
 
-  .disc {{ margin-top: 9px; background: #f0f4f8; border-radius: 8px; padding: 10px 18px; }}
+  .disc {{ margin-top: 7px; background: #f0f4f8; border-radius: 8px; padding: 8px 18px; }}
   .disc .dl {{ font-size: 9px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #8a99ab; margin-bottom: 5px; }}
   .disc p {{ font-size: 9.5px; color: #8a99ab; line-height: 1.5; }}
   .disc b, .disc strong {{ color: #5a6b7e; }}
 
-  .spacer {{ flex: 1; }}
+  .spacer {{ display: none; }}
 
-  .foot {{ background: #06101f; padding: 13px 40px; display: flex; align-items: center; justify-content: space-between; }}
+  .foot {{ background: #06101f; padding: 13px 40px; display: flex; align-items: center; justify-content: space-between; position: absolute; left: 0; right: 0; bottom: 0; }}
   .foot span {{ font-size: 10px; color: #8fa3b8; letter-spacing: .03em; }}
   .foot .conf-tag {{ color: #4a9af5; font-weight: 700; letter-spacing: .18em; }}
 </style>
@@ -1088,13 +1091,13 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
       </div>
 
       <div class="keyfind">
-        <div class="kf-icon">{icon}</div>
-        <div class="kf-main">
+        <div class="kf-cell kf-icon-cell"><div class="kf-icon">{icon}</div></div>
+        <div class="kf-cell kf-main">
           <div class="kf-lbl">Key Finding</div>
           <h2>Hail of {threshold} or greater <span class="fig">{verb}</span> at this property.</h2>
           <div class="kf-sub">Maximum estimated hail at the property location on the date of loss was <b>{max_phrase}</b> &mdash; {thr} the {threshold} damage threshold.</div>
         </div>
-        <div class="kf-badge">{badge}</div>
+        <div class="kf-cell kf-badge-cell"><div class="kf-badge">{badge}</div></div>
       </div>
 
       <div class="duo">
@@ -1144,6 +1147,14 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   </div>
 </body>
 </html>"""
+
+
+def clip_text(text, limit):
+    """Cap pathological input lengths so the one-page layout can never break.
+    Normal addresses/claim refs are far below these caps; only torture-length
+    strings lose a few trailing characters to an ellipsis."""
+    t = str(text or "")
+    return t if len(t) <= limit else t[:limit - 1].rstrip() + "\u2026"
 
 
 def soft_wrap_html(text, limit=58):
@@ -1200,12 +1211,12 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
     # Map area: real image if present, else the styled placeholder (template default).
     if data.get("mapDataUri"):
         map_block = (
-            f'<div style="height:158px; background-color:#dbe7f2; '
+            f'<div style="height:128px; background-color:#dbe7f2; '
             f'background-image:url(\'{data["mapDataUri"]}\'); background-size:cover; '
             f'background-position:center; background-repeat:no-repeat;"></div>')
     else:
         map_block = (
-            '<div style="position:relative; height:158px; background:#dbe7f2; overflow:hidden;">'
+            '<div style="position:relative; height:128px; background:#dbe7f2; overflow:hidden;">'
             '<div style="position:absolute; inset:0; background:radial-gradient(circle at 50% 52%, '
             'rgba(217,79,61,.78) 0%, rgba(230,161,23,.62) 26%, rgba(40,166,120,.42) 50%, rgba(219,231,242,0) 72%);"></div>'
             '</div>')
@@ -1253,8 +1264,8 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
         report_id=data["reportId"],
         report_date=data["dateGenerated"],
         date_of_loss=data["dateOfLoss"],
-        address=soft_wrap_html(data["propertyAddress"]),
-        claim_ref=soft_wrap_html(data["claimRef"], 26),
+        address=soft_wrap_html(clip_text(data["propertyAddress"], 110)),
+        claim_ref=clip_text(data["claimRef"], 28),
         coords=data["coordinates"],
         kf_accent=t["main"], kf_bg=t["tint"], kf_bd=t["tintBorder"],
         icon=icon,
