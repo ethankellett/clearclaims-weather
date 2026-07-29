@@ -999,7 +999,7 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
     border-radius: 10px; padding: 13px 20px; }}
   .kf-cell {{ display: table-cell; vertical-align: middle; }}
   .kf-icon-cell {{ width: 58px; min-width: 58px; }}
-  .kf-icon {{ width: 54px; height: 54px; border-radius: 50%; background: {kf_accent};
+  .kf-icon {{ width: 52px; height: 52px; border-radius: 50%; background: {kf_accent};
     display: flex; align-items: center; justify-content: center; }}
   .kf-icon svg {{ width: 30px; height: 30px; display: block; }}
   .kf-main {{ padding: 0 18px; }}
@@ -1206,7 +1206,7 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
 
     res = data["results"]
     ap, m1, m3, m5 = res["atProperty"], res["mile1"], res["mile3"], res["mile5"]
-    max_value = f'{ap["in"]}″ ({ap["mm"]} mm)'
+    max_value = f'{ap["in"]}″\u00a0({ap["mm"]}\u00a0mm)'
 
     # Map area: real image if present, else the styled placeholder (template default).
     if data.get("mapDataUri"):
@@ -1236,7 +1236,8 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
         "Cotality or CoreLogic</strong>.")
 
     # --- new-design (2026-06 refresh) field mapping -------------------------
-    max_phrase = f'{ap["in"]}″ ({ap["mm"]} mm)'
+    # non-breaking spaces: never split the reading from its unit across lines
+    max_phrase = f'{ap["in"]}″\u00a0({ap["mm"]}\u00a0mm)'
 
     _est = [("At Property", ap, True), ("Within 1 mile", m1, False),
             ("Within 3 miles", m3, False), ("Within 5 miles", m5, False)]
