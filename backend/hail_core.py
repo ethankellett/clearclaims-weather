@@ -996,7 +996,7 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
 
   .keyfind {{ margin-top: 8px; display: table; width: 100%; box-sizing: border-box;
     background: {kf_bg}; border: 1px solid {kf_bd}; border-left: 5px solid {kf_accent};
-    border-radius: 10px; padding: 9px 20px; }}
+    border-radius: 10px; padding: 13px 20px; }}
   .kf-cell {{ display: table-cell; vertical-align: middle; }}
   .kf-icon-cell {{ width: 54px; }}
   .kf-icon {{ width: 54px; height: 54px; border-radius: 50%; background: {kf_accent};
@@ -1006,7 +1006,7 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .kf-lbl {{ font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: {kf_accent}; }}
   .keyfind h2 {{ font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 22px; line-height: 1.12; color: #06101f; margin-top: 4px; }}
   .keyfind h2 .fig {{ color: {kf_accent}; }}
-  .kf-sub {{ font-size: 13px; color: #4a5d76; line-height: 1.5; margin-top: 8px; }}
+  .kf-sub {{ font-size: 13px; color: #4a5d76; line-height: 1.5; margin-top: 9px; }}
   .kf-sub b {{ color: #152742; font-weight: 600; }}
   .kf-badge-cell {{ white-space: nowrap; }}
   .kf-badge {{ display: inline-block; background: {kf_accent}; color: #fff; font-size: 13px; font-weight: 700;
