@@ -91,20 +91,37 @@ def pdf_text(path):
                           text=True).stdout
 
 
-print("\n=== 1. NO RADAR COVERAGE (the D1 defect) ===")
+print("\n=== 1. ALL-SENTINEL GRID = QUIET DAY, NOT A COVERAGE FAILURE ===")
+# Learned from the first live run (2026-08-27): MESH is a SPARSE field. On a
+# quiet day almost every cell is a missing sentinel. That must read as 0.00 in,
+# NOT as "coverage unavailable" - but the report must also stop claiming it has
+# verified coverage, because MESH alone cannot tell a gap from a hail-free cell.
 r = run("nocov", no_coverage())
 t = pdf_text(r["pdf_path"])
-check("coverage state is 'none'", r["coverage"]["state"] == "none", r["coverage"]["state"])
-check("PDF says coverage unavailable", "coverage was unavailable" in t.lower())
-check("PDF does NOT print 0.00 in", "0.00" not in t, repr([l for l in t.splitlines() if "0.00" in l]))
-check("PDF does NOT say NOT DETECTED", "not detected" not in t.lower())
-check("no confidence chip", r["confidence"]["level"] is None, str(r["confidence"]["level"]))
-check("detected is None, not False", r["classification"]["detected"] is None)
+check("coverage state is 'unknown' (honest)", r["coverage"]["state"] == "unknown",
+      r["coverage"]["state"])
+check("reads as 0.00 in, not a failure", r["classification"]["band"] == "none",
+      r["classification"]["band"])
+check("PDF prints 0.00", "0.00" in t)
+check("PDF discloses coverage is unverified", "not independently verified" in t.lower())
+check("negative still called weak", "weaker evidence" in t.lower())
+check("confidence capped at Moderate", r["confidence"]["level"] == "Moderate",
+      str(r["confidence"]["level"]))
+
+print("\n=== 1b. GENUINE no-coverage state still renders correctly ===")
+# Reached when a future coverage source (MRMS RQI, PR 2) reports a real gap.
+cls = hc.classify_hail(None, None, 0.75, coverage_state="none")
+check("band = no_coverage", cls["band"] == "no_coverage")
+check("detected is None, not False", cls["detected"] is None)
+check("verdict states coverage unavailable",
+      "coverage was unavailable" in cls["verdict"].lower())
+conf = hc.assess_confidence(None, None, [], 0.75, coverage_state="none")
+check("no confidence level", conf["level"] is None)
 
 print("\n=== 2. ZERO HAIL, GOOD COVERAGE ===")
 r = run("zero", blob(0))
 t = pdf_text(r["pdf_path"])
-check("coverage ok", r["coverage"]["state"] == "ok")
+check("coverage state honest (unknown until RQI)", r["coverage"]["state"] == "unknown", r["coverage"]["state"])
 check("badge = None Detected", r["classification"]["badge"] == "None Detected")
 check("calls the negative weak", "weaker evidence" in t.lower())
 check("confidence capped at Moderate", r["confidence"]["level"] == "Moderate",

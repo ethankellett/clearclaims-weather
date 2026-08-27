@@ -486,26 +486,31 @@ def haversine_miles(lat1, lon1, lat2, lon2):
 def sample_rings(lats, lons, mesh_mm, lat, lon, rings=(0.5, 1, 3, 5)):
     """Value at the property (nearest cell) plus the MAX within each ring radius.
 
-    CRITICAL (defect D1): a cell with NO RADAR COVERAGE is NaN, and NaN is NOT
-    zero hail. This function therefore returns ``None`` for mm/in whenever the
-    footprint contains no valid radar data at all, and reports how many cells
-    were valid. Callers must render "coverage unavailable", never "0.00 in".
+    IMPORTANT — what a NaN cell means here (corrected 2026-08-27 after the first
+    live run against real MRMS data):
 
-    Returns {'point': {...}, 0.5: {...}, 1: {...}, 3: {...}, 5: {...}} where each
-    entry is {'mm', 'in', 'lat', 'lon', 'valid_cells', 'total_cells'} and mm/in
-    are None when no valid cell was found.
+    MESH is a SPARSE field. The algorithm writes a value only where it diagnosed
+    hail; everywhere else carries a missing sentinel that read_mesh_grib turns
+    into NaN. So on an ordinary quiet day almost the whole grid is NaN. NaN
+    therefore means "no hail signal in this cell", and reads as 0.00 in.
+
+    It does NOT mean "the radar cannot see here". Nothing in the MESH field
+    distinguishes a genuine radar gap from a hail-free cell — that needs the
+    separate MRMS RadarQualityIndex product, which is wired up in PR 2. Until
+    then the report must not claim to have verified coverage either way.
+
+    `no_data` is True only when the ENTIRE cropped grid was unreadable, which is
+    a real failure rather than a quiet day.
     """
     LON, LAT = np.meshgrid(lons, lats)
     dist = haversine_miles(lat, lon, LAT, LON)
     finite = np.isfinite(mesh_mm)
 
     pi, pj = np.unravel_index(np.nanargmin(dist), dist.shape)
-    p_valid = bool(finite[pi, pj])
-    p_mm = float(mesh_mm[pi, pj]) if p_valid else None
-    out = {"point": {"mm": p_mm,
-                     "in": (p_mm / MM_PER_INCH) if p_mm is not None else None,
+    p_mm = float(mesh_mm[pi, pj]) if finite[pi, pj] else 0.0
+    out = {"point": {"mm": p_mm, "in": p_mm / MM_PER_INCH,
                      "lat": float(lats[pi]), "lon": float(lons[pj]),
-                     "valid_cells": int(p_valid), "total_cells": 1}}
+                     "valid_cells": int(finite[pi, pj]), "total_cells": 1}}
 
     for r in rings:
         mask = dist <= r
@@ -515,8 +520,8 @@ def sample_rings(lats, lons, mesh_mm, lat, lon, rings=(0.5, 1, 3, 5)):
         valid = mask & finite
         n_total, n_valid = int(mask.sum()), int(valid.sum())
         if n_valid == 0:
-            # No radar coverage anywhere in this footprint. NOT zero hail.
-            out[r] = {"mm": None, "in": None, "lat": lat, "lon": lon,
+            # No hail diagnosed anywhere in this footprint -> 0.00 in.
+            out[r] = {"mm": 0.0, "in": 0.0, "lat": lat, "lon": lon,
                       "valid_cells": 0, "total_cells": n_total}
             continue
         vals = np.where(valid, mesh_mm, np.nan)
@@ -540,14 +545,24 @@ COVERAGE_MIN_FRAC = 0.50     # >= this -> "partial";  below -> "none"
 
 
 def assess_coverage(lats, lons, mesh_mm, lat, lon, radius_miles=COVERAGE_RADIUS_MI):
-    """Classify radar coverage around the property as 'ok' | 'partial' | 'none'.
+    """Classify radar coverage as 'ok' | 'unknown' | 'none'.
 
-    MRMS encodes no-coverage / missing with large negative sentinels, which
-    read_mesh_grib turns into NaN. A location in a radar gap or behind terrain
-    blockage (very relevant in the Black Hills) therefore has few or no valid
-    cells — and MUST NOT be reported as 0.00 in / NOT DETECTED.
+    Honest limitation: the MESH field alone CANNOT tell a radar gap from a
+    hail-free cell, because MESH is sparse and writes nothing where it found no
+    hail. Counting valid cells here measures "did hail happen nearby", which is
+    a different question — that mistake shipped briefly on 2026-08-27 and made
+    every quiet day read as a coverage failure.
 
-    Returns {state, valid_frac, valid_cells, total_cells, radius_miles}.
+    So this returns:
+      'none'    - the entire cropped grid was unreadable (a real data failure)
+      'unknown' - the normal case: nothing contradicts coverage, but nothing
+                  confirms it either. The report says so rather than implying a
+                  verified negative.
+      'ok'      - reserved for when the MRMS RadarQualityIndex product is wired
+                  in (PR 2) and actually confirms the radar can see this point.
+
+    `hail_cells` is kept for diagnostics: how many cells within the radius
+    carried a hail signal at all.
     """
     LON, LAT = np.meshgrid(lons, lats)
     dist = haversine_miles(lat, lon, LAT, LON)
@@ -557,16 +572,18 @@ def assess_coverage(lats, lons, mesh_mm, lat, lon, radius_miles=COVERAGE_RADIUS_
         mask = np.zeros_like(dist, dtype=bool)
         mask[pi, pj] = True
     total = int(mask.sum())
-    valid = int((mask & np.isfinite(mesh_mm)).sum())
-    frac = (valid / total) if total else 0.0
-    if frac >= COVERAGE_OK_FRAC:
-        state = "ok"
-    elif frac >= COVERAGE_MIN_FRAC:
-        state = "partial"
-    else:
-        state = "none"
-    return {"state": state, "valid_frac": frac, "valid_cells": valid,
-            "total_cells": total, "radius_miles": radius_miles}
+    hail_cells = int((mask & np.isfinite(mesh_mm)).sum())
+
+    # Deliberately ALWAYS 'unknown' until RQI lands. A quiet day and a radar gap
+    # are indistinguishable in the MESH field, so any grid-derived guess here is
+    # a coin flip dressed as a finding. A genuine unreadable-grid failure raises
+    # upstream in max_mesh_over_files / _fetch_grib_paths and never reaches here.
+    state = "unknown"
+    return {"state": state, "hail_cells": hail_cells, "total_cells": total,
+            "radius_miles": radius_miles, "quality_source": None,
+            # kept so older callers/templates don't KeyError
+            "valid_cells": hail_cells,
+            "valid_frac": (hail_cells / total) if total else 0.0}
 
 
 # -----------------------------------------------------------------------------
@@ -607,6 +624,10 @@ def classify_hail(peak_in, cell_in, threshold_in, coverage_state="ok"):
     """
     thr = f"{threshold_in:.2f}\u2033"
 
+    coverage_caveat = (
+        " Radar coverage at this location is not independently verified in this "
+        "version, so a coverage gap cannot be fully ruled out.")
+
     if coverage_state == "none" or peak_in is None:
         return {
             "band": "no_coverage", "theme": "unknown", "detected": None,
@@ -624,7 +645,8 @@ def classify_hail(peak_in, cell_in, threshold_in, coverage_state="ok"):
         badge = "None Detected"
         verdict = "Radar shows no hail signature at this property on this date."
         detail = ("A radar-based negative is weaker evidence than a positive. "
-                  "Small or brief hail can fall below what the radar resolves.")
+                  "Small or brief hail can fall below what the radar resolves."
+                  + (coverage_caveat if coverage_state != "ok" else ""))
         likelihood = "No indication"
     elif peak_in < MESH_DISCRIMINATION_FLOOR_IN:
         band, theme = "trace", "caution"
@@ -830,6 +852,7 @@ def assess_confidence(point_in, ring_max_in, reports, threshold_in, source=None,
     n = len(reports)
     biggest = max([r["size_in"] for r in reports if r["size_in"]], default=0.0)
     partial = (coverage_state == "partial")
+    unverified = (coverage_state == "unknown")
 
     if detected:
         if n >= 1:
@@ -859,7 +882,8 @@ def assess_confidence(point_in, ring_max_in, reports, threshold_in, source=None,
             note = ("Radar shows no significant hail at the property and no ground "
                     "reports were logged nearby. A radar-based negative is weaker "
                     "evidence than a positive \u2014 brief or small hail can fall below "
-                    "what the radar resolves.")
+                    "what the radar resolves, and radar coverage at this point is not "
+                    "independently verified in this version.")
 
     if partial:
         level = {"High": "Moderate", "Moderate": "Low", "Low": "Low"}[level]
@@ -1337,9 +1361,8 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
 
     # ---- Key Finding readings line ---------------------------------------
     if cls.get("band") == "no_coverage":
-        kf_readings = (f'Valid radar cells within {cov.get("radius_miles", 5):.0f} miles: '
-                       f'<b>{cov.get("valid_cells", 0)} of {cov.get("total_cells", 0)}</b> '
-                       f'({cov.get("valid_frac", 0.0) * 100:.0f}%).')
+        kf_readings = ("The radar grid for this date could not be read at this "
+                       "location, so no hail size is stated.")
     else:
         kf_readings = (f'Peak within &frac12; mile: <b>{phrase(half)}</b> &nbsp;&middot;&nbsp; '
                        f'value at nearest grid cell: <b>{phrase(cell)}</b> &nbsp;&middot;&nbsp; '
