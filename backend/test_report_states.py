@@ -407,17 +407,27 @@ import snow_core as sc
 z = sc.assess_snow_confidence(1.0, [], 6.0)
 check("no-station negative is no longer High", z["level"] != "High", z["level"])
 check("no longer claims stations agree", "stations agree" not in z["note"])
-check("says plainly there was no station", "NO nearby station" in z["note"])
-check("calls it an unverified model negative",
-      "unverified model negative" in z["note"])
-_sr = lambda snow, d: {"snow_in": snow, "dist_mi": d, "dir": "N", "source": "COOP"}
-ok = sc.assess_snow_confidence(1.0, [_sr(0.5, 6.0)], 6.0)
-check("close corroborated negative earns High", ok["level"] == "High", ok["level"])
-far_s = sc.assess_snow_confidence(1.0, [_sr(0.5, 40.0)], 6.0)
-check("distant corroborated negative is Moderate", far_s["level"] == "Moderate",
-      far_s["level"])
+check("says plainly there was no station",
+      "No official station reported" in z["note"], z["note"][:80])
+check("calls it an unverified model value",
+      "unverified model value, not a measurement" in z["note"])
+_sr = lambda snow, d, dep=None: {"snow_in": snow, "depth_in": dep, "dist_mi": d,
+                                 "dir": "N", "source": "NWS KUNR", "name": "Rapid City"}
+# A measured DEPTH that agrees with the model is the real corroboration now.
+ok = sc.assess_snow_confidence(2.6, [_sr(0.5, 5.0, dep=2.0)], 6.0)
+check("agreeing measured depth earns High", ok["level"] == "High", ok["level"])
+check("note cites the measured depth", "2\u2033" in ok["note"] or "2&#x2033;" in ok["note"]
+      or "measured 2" in ok["note"], ok["note"][:90])
+dis = sc.assess_snow_confidence(14.0, [_sr(0.5, 5.0, dep=2.0)], 6.0)
+check("disagreeing measured depth drops to Low", dis["level"] == "Low", dis["level"])
+snowonly = sc.assess_snow_confidence(1.0, [_sr(0.5, 6.0)], 6.0)
+check("snowfall-only station is a partial check (Moderate)",
+      snowonly["level"] == "Moderate", snowonly["level"])
 conflict = sc.assess_snow_confidence(1.0, [_sr(9.0, 8.0)], 6.0)
 check("conflicting station drops it to Low", conflict["level"] == "Low", conflict["level"])
+conflict2 = sc.assess_snow_confidence(1.0, [_sr(None, 8.0, dep=9.0)], 6.0)
+check("station depth over threshold conflicts too", conflict2["level"] == "Low",
+      conflict2["level"])
 
 sd = sc.build_snow_report_data(
     report_id="CC-S-TEST", address_label="1 Test St", lat=CY, lon=CX,
@@ -430,7 +440,7 @@ check("headline is about snow LOAD", "snow load" in sd["findingHtml"].lower())
 check("states depth includes older snowpack",
       "includes" in sd["findingSubHtml"] and "older snowpack" in sd["findingSubHtml"])
 check("explicitly not a claim that snow fell that day",
-      "not a statement that snow fell on this date" in sd["findingSubHtml"])
+      "not a statement that snow fell on this date" in sd["resultsFootnote"])
 check("new snowfall reported separately",
       any("NEW snowfall" in r["label"] for r in sd["rows"]))
 check("depth row marked as modelled",
@@ -513,6 +523,115 @@ check("most-recent >=1.00in stat shows its own date", "2024-01-14" in t)
 check("still exactly 2 pages",
       "Pages:           2" in _sp.run(["pdfinfo", r["pdf_path"]],
                                       capture_output=True, text=True).stdout)
+
+print("\n=== 20. NO-COVERAGE TABLE SHOWS NO NUMBERS (F2) ===")
+r = run("nocov2", blob(1.40), rqi=0.0, context={})
+t = pdf_text(r["pdf_path"])
+check("coverage state none", r["coverage"]["state"] == "none", r["coverage"]["state"])
+_tbl = t[t.index("SIZE" if "SIZE" in t else "MEASUREMENT"):]
+_t_no_meta = t.replace("(index 0.00)", "")   # the RQI index value, clearly labelled
+check("no 0.00 presented as a hail size", "0.00" not in _t_no_meta, "")
+check("RQI value labelled as an index", "index 0.00" in t)
+check("size table carries no 1.40 either", "1.40" not in t, "")
+check("caption explains why values are absent",
+      "could not see this location" in t.lower())
+check("absence-of-data line present", "absence of" in t.lower())
+
+print("\n=== 21. PER-PERIL ARCHIVE FLOORS (F3) ===")
+import datetime as _dt2
+for peril, good, bad in [("hail", _dt2.date(2021, 5, 1), _dt2.date(2019, 6, 1)),
+                         ("wind", _dt2.date(2006, 6, 1), _dt2.date(2004, 6, 1)),
+                         ("snow", _dt2.date(2004, 1, 15), _dt2.date(2003, 6, 1))]:
+    hc.validate_date_of_loss(good, peril=peril)     # must not raise
+    try:
+        hc.validate_date_of_loss(bad, peril=peril)
+        check(f"{peril}: pre-archive date refused", False, "no error")
+    except ValueError as e:
+        check(f"{peril}: pre-archive date refused", True)
+        check(f"{peril}: message names its own archive",
+              ("hail-radar" in str(e)) == (peril == "hail"), str(e)[:70])
+check("wind 2018 now accepted (was refused this morning)",
+      hc.validate_date_of_loss(_dt2.date(2018, 6, 20), peril="wind") is None)
+
+print("\n=== 22. WARNING TEMPERS A CONFIDENT NEGATIVE (F8) ===")
+c = hc.assess_confidence(0.0, 0.0, [], 0.75, quality_grade="Excellent", n_warnings=2)
+check("warned negative capped at Moderate", c["level"] == "Moderate", c["level"])
+check("note explains the warning", "warning(s) covered this property" in c["note"])
+c2 = hc.assess_confidence(0.0, 0.0, [], 0.75, quality_grade="Excellent", n_warnings=0)
+check("unwarned clean negative still High", c2["level"] == "High", c2["level"])
+c3 = hc.assess_confidence(1.5, 1.6, [{"size_in": 1.0, "dist_mi": 2.0}], 0.75,
+                          quality_grade="Excellent", n_warnings=3)
+check("positive untouched by warnings", c3["level"] == "High", c3["level"])
+r = run("warned_neg", blob(0), rqi=0.92,
+        context=ctx_sample(n_events=0, warned=True, gust=None))
+check("full pipeline: warned negative is Moderate",
+      r["confidence"]["level"] == "Moderate", r["confidence"]["level"])
+t = pdf_text(r["pdf_path"])
+check("verdict wording is at-or-near (F7)",
+      "at or near this property" in " ".join(t.lower().split()))
+
+print("\n=== 23. WIND NUMBERS ATTRIBUTED TO THEIR STATIONS (W-A, live find) ===")
+import wind_core as wc2
+_stW = lambda i, mph, d: {"id": i, "name": i, "gust_mph": mph, "dist_mi": d,
+                          "lat": CY, "lon": CX}
+wd = wc2.build_wind_report_data(
+    report_id="T", address_label="x", lat=CY, lon=CX, date_of_loss=DOL,
+    contact_url="u", contact_city="c", claim_ref="", threshold_mph=58.0,
+    station_gusts=[_stW("FSD", 63.0, 2.6), _stW("MDS", 97.0, 37.2)],
+    reports=[], map_data_uri="")
+sub = wd["findingSubHtml"]
+check("nearest station paired with ITS reading", "FSD" in sub and "63" in sub)
+check("peak paired with ITS station and distance",
+      "97" in sub and "MDS" in sub and "37.2" in sub)
+check("97 is never attributed to FSD",
+      "97 mph</strong> at FSD" not in sub.replace("\n", ""))
+hot = [r0["label"] for r0 in wd["rows"] if r0.get("highlight")]
+check("highlighted row is the peak measurement", hot == ["Measured \u2014 MDS"], str(hot))
+
+print("\n=== 24. LOCAL-TIME WARNINGS ON PAGE 2 (F6) ===")
+r = run("tzcard", blob(1.40), context=ctx_sample())
+t = pdf_text(r["pdf_path"])
+check("warning time shown in local clock time (AM/PM)",
+      ("PM" in t or "AM" in t) and "22:58 UTC" not in t)
+
+print("\n=== 25. SNOW CLI PARSER (S5) ===")
+_cli = {"features": [
+  {"geometry": {"coordinates": [CX + 0.05, CY + 0.03]},
+   "properties": {"station": "KUNR", "name": "Rapid City", "snow": 0.5,
+                  "snowdepth": 2}},
+  {"geometry": {"coordinates": [CX + 3.0, CY]},
+   "properties": {"station": "KFAR", "name": "Fargo", "snow": 8.0, "snowdepth": 12}},
+  {"geometry": {"coordinates": [CX, CY + 0.1]},
+   "properties": {"station": "KXXX", "name": "NoData", "snow": "M", "snowdepth": "M"}},
+]}
+got = sc.parse_cli_snow(_cli, CY, CX, 40.0)
+check("keeps the in-range site with data", len(got) == 1 and got[0]["name"] == "Rapid City",
+      str(got))
+check("carries BOTH new snow and measured depth",
+      got[0]["snow_in"] == 0.5 and got[0]["depth_in"] == 2.0)
+_tr = sc.parse_cli_snow({"features": [{"geometry": {"coordinates": [CX, CY]},
+      "properties": {"station": "K1", "name": "T", "snow": "T", "snowdepth": "M"}}]},
+      CY, CX, 40.0)
+check("trace snowfall parsed as 0.0", _tr and _tr[0]["snow_in"] == 0.0, str(_tr))
+
+print("\n=== 26. EMAIL VERDICTS PER PERIL (F12) ===")
+import emailer as em
+v, c0 = em.email_verdict({"peril": "wind", "detected": True, "badge": "Detected"})
+check("wind email never says hail", "Hail" not in v, v)
+v, c0 = em.email_verdict({"peril": "hail", "coverage": "none", "detected": False})
+check("coverage-unavailable email is not a green negative",
+      v == "Radar Coverage Unavailable" and c0 == "#5a6b7e", f"{v} {c0}")
+v, c0 = em.email_verdict({"peril": "hail", "detected": False,
+                          "badge": "Trace / Indeterminate"})
+check("trace email is amber, not green", c0 == "#e6a117", c0)
+v, c0 = em.email_verdict({"peril": "snow", "detected": False, "badge": "Below Threshold"})
+check("snow email verdict is snow-worded", "Snow" in v or v == "Below Threshold", v)
+html = em.build_email_html({"peril": "wind", "detected": True, "badge": "Detected",
+                            "address": "1 Main St", "date_of_loss": "2022-05-12",
+                            "headline": "Measured 63 mph at FSD (2.6 mi)",
+                            "confidence": "High"}, "https://x/r/1")
+check("email body carries the honest headline", "Measured 63 mph at FSD" in html)
+check("email body has no None fields", "None" not in html)
 
 print(f"\n{'='*60}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

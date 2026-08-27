@@ -109,8 +109,17 @@ def fetch_snodas_product(date_of_loss, product_code, tmpdir, timeout=120):
     mon = f"{date_of_loss:%m_%b}"
     base = (f"https://noaadata.apps.nsidc.org/NOAA/G02158/masked/"
             f"{date_of_loss:%Y}/{mon}/SNODAS_{date_of_loss:%Y%m%d}.tar")
-    r = requests.get(base, timeout=timeout)
-    r.raise_for_status()
+    try:
+        r = requests.get(base, timeout=timeout)
+        r.raise_for_status()
+    except Exception as exc:
+        # F4: a missing daily tar (404, outage) used to escape as a raw
+        # HTTPError and reach the customer as "500 Internal Server Error".
+        raise ValueError(
+            f"NOAA's daily snow analysis (SNODAS) is not available for "
+            f"{date_of_loss:%B %d, %Y}. Snow cannot be verified for this date "
+            f"right now \u2014 if the date is recent, the file may simply not be "
+            f"published yet; try again tomorrow.") from exc
     tf = tarfile.open(fileobj=io.BytesIO(r.content))
     member = None
     for m in tf.getmembers():
@@ -148,16 +157,62 @@ def parse_iem_daily_snow(obj: dict, lat, lon, radius_miles):
     return out
 
 
-def fetch_station_snowfall(lat, lon, date_of_loss, radius_miles=25.0, timeout=30):
-    """Best-effort nearby station 24-h snowfall from IEM daily data. Never raises."""
+def parse_cli_snow(obj: dict, lat, lon, radius_miles):
+    """Parse the IEM cli.py GeoJSON (official NWS daily climate reports).
+
+    Each feature is one NWS climate site's CLI product for the day, carrying
+    BOTH `snow` (measured NEW snowfall, inches) and `snowdepth` (measured snow
+    ON THE GROUND, inches). The depth value is a direct, independent check on
+    the SNODAS model \u2014 something the old endpoint never provided.
+    """
+    out = []
+    for feat in (obj or {}).get("features", []) or []:
+        p = feat.get("properties", {}) or {}
+        coords = (feat.get("geometry") or {}).get("coordinates") or [None, None]
+        slon, slat = coords[0], coords[1]
+        if slat is None:
+            continue
+
+        def _f(v):
+            try:
+                x = float(v)
+                return x if x >= 0 else None      # -0.0/-9999 style sentinels
+            except (TypeError, ValueError):
+                return None                        # "M" = missing, "T" handled below
+
+        snow_in = _f(p.get("snow"))
+        if snow_in is None and str(p.get("snow", "")).strip().upper() == "T":
+            snow_in = 0.0                          # trace
+        depth_in = _f(p.get("snowdepth"))
+        if snow_in is None and depth_in is None:
+            continue
+        d = float(hc.haversine_miles(lat, lon, slat, slon))
+        if d <= radius_miles:
+            out.append({"source": f'NWS {p.get("station", "")}'.strip(),
+                        "snow_in": snow_in, "depth_in": depth_in,
+                        "lat": float(slat), "lon": float(slon), "dist_mi": d,
+                        "dir": hc.compass_bearing(lat, lon, slat, slon),
+                        "name": p.get("name", p.get("station", ""))})
+    out.sort(key=lambda s: s["dist_mi"])
+    return out
+
+
+def fetch_station_snowfall(lat, lon, date_of_loss, radius_miles=40.0, timeout=30):
+    """Official NWS daily climate (CLI) reports near the property. Never raises.
+
+    HISTORY (2026-08-27 review): the previous endpoint, climodat_dvp.geojson,
+    does not exist \u2014 it returns an HTML page, r.json() throws, and the
+    except swallowed it. Every snow report ever generated had silently empty
+    station corroboration. Verified live: cli.py returns real data (Rapid City
+    2022-12-15: 0.5\u2033 new snow, 2\u2033 on the ground \u2014 which also
+    independently confirmed the SNODAS reading for that day). CLI sites are
+    sparse (one per NWS climate site), hence the wider 40-mile radius.
+    """
     import requests
     try:
-        pad = 0.5
-        params = {"date": f"{date_of_loss:%Y-%m-%d}",
-                  "west": lon - pad, "east": lon + pad, "south": lat - pad, "north": lat + pad}
-        r = requests.get("https://mesonet.agron.iastate.edu/geojson/climodat_dvp.geojson",
-                         params=params, timeout=timeout)
-        return parse_iem_daily_snow(r.json(), lat, lon, radius_miles)
+        r = requests.get("https://mesonet.agron.iastate.edu/geojson/cli.py",
+                         params={"dt": f"{date_of_loss:%Y-%m-%d}"}, timeout=timeout)
+        return parse_cli_snow(r.json(), lat, lon, radius_miles)
     except Exception:
         return []
 
@@ -231,12 +286,9 @@ _SNOW_RANK = {"Excellent": 3, "Good": 2, "Fair": 1, "No station": 0}
 def assess_snow_confidence(depth_in, station_reports, threshold_in):
     """Confidence in the snow verdict.
 
-    Two corrections over the previous version:
-      1. The clean-negative branch used to return High with the note "nearby
-         stations agree" — a sentence it printed even when there were ZERO
-         nearby stations. Nothing can agree if nothing is there.
-      2. SNODAS is a MODEL analysis, not an instrument. An unchecked model
-         negative should not read as the strongest possible result.
+    The strongest evidence available here is a MEASURED depth from an official
+    NWS climate site (cli.py `snowdepth`): it checks the SNODAS model's number
+    directly. Agreement within max(2\u2033, 50%) counts as corroboration.
     """
     detected = depth_in is not None and depth_in >= threshold_in
     n = len(station_reports)
@@ -244,32 +296,50 @@ def assess_snow_confidence(depth_in, station_reports, threshold_in):
     q = grade_snow_station(nearest)
     rank = _SNOW_RANK.get(q["grade"], 0)
 
-    if detected:
-        if n >= 1:
-            lvl = "High"
-            note = (f"Gridded snow depth meets the threshold and is corroborated by {n} "
-                    f"nearby station snowfall report(s).")
-        else:
-            lvl = "Moderate"
-            note = ("Gridded snow depth meets the threshold, but no nearby station "
-                    "report was available to corroborate the model.")
-    elif n >= 1 and any(r["snow_in"] >= threshold_in for r in station_reports):
+    with_depth = [r for r in station_reports if r.get("depth_in") is not None]
+    best_depth = with_depth[0] if with_depth else None    # list is distance-sorted
+    agrees = None
+    if best_depth is not None and depth_in is not None:
+        tol = max(2.0, 0.5 * max(depth_in, best_depth["depth_in"]))
+        agrees = abs(depth_in - best_depth["depth_in"]) <= tol
+
+    conflict = any(
+        (r.get("depth_in") is not None and r["depth_in"] >= threshold_in) or
+        (r.get("snow_in") is not None and r["snow_in"] >= threshold_in)
+        for r in station_reports) and not detected
+
+    if conflict:
         lvl = "Low"
-        note = ("Gridded depth at the property is below threshold, but a nearby station "
-                "reported significant snowfall \u2014 verify location and timing.")
+        note = ("The modelled depth at the property is below the threshold, but an "
+                "official station nearby measured snow at or above it \u2014 verify "
+                "location and timing.")
+    elif best_depth is not None and agrees:
+        lvl = "High" if rank >= 2 else "Moderate"
+        note = (f"The NWS climate site at {best_depth.get('name', 'a nearby station')} "
+                f"({best_depth['dist_mi']:.0f} mi) measured {best_depth['depth_in']:.0f}\u2033 "
+                f"of snow on the ground, consistent with the modelled value at the "
+                f"property.")
+    elif best_depth is not None and agrees is False:
+        lvl = "Low"
+        note = (f"The nearest official measurement "
+                f"({best_depth['depth_in']:.0f}\u2033 on the ground at "
+                f"{best_depth.get('name', 'a nearby station')}, "
+                f"{best_depth['dist_mi']:.0f} mi) disagrees with the modelled value "
+                f"at the property \u2014 treat the modelled figure with caution.")
     elif n >= 1:
-        lvl = "High" if rank >= 3 else "Moderate"
-        note = (f"Gridded snow depth is below the threshold and {n} nearby station "
-                f"report(s) are consistent with that. {q['note']}")
-    else:
-        # No stations at all. The old code claimed High here and said stations agreed.
         lvl = "Moderate"
-        note = ("Gridded snow depth is below the threshold, but NO nearby station "
-                "reported snowfall for this date, so the model has no independent "
-                "check. This is an unverified model negative, not a measurement.")
+        note = (f"{n} official station report(s) nearby, but none measured snow "
+                f"depth on the ground, so the model has only a partial check. "
+                f"{q['note']}")
+    else:
+        lvl = "Moderate"
+        note = ("No official station reported snow measurements near this property "
+                "for this date, so the model has no independent check. This is an "
+                "unverified model value, not a measurement.")
 
     color = {"High": "#28a678", "Moderate": "#e6a117", "Low": "#d94f3d"}[lvl]
-    return {"level": lvl, "color": color, "note": note, "n_reports": n, "quality": q}
+    return {"level": lvl, "color": color, "note": note, "n_reports": n, "quality": q,
+            "station_depth_in": (best_depth or {}).get("depth_in")}
 
 
 # ---- assemble report ------------------------------------------------------
@@ -287,14 +357,20 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
     coord = f"{abs(lat):.4f}° {ns}, {abs(lon):.4f}° {ew}"
     thr = f'{threshold_in:.0f}″'
 
-    nearest_snow = station_reports[0]["snow_in"] if station_reports else None
+    _with_snow = [r for r in station_reports if r.get("snow_in") is not None]
+    nearest_snow = _with_snow[0]["snow_in"] if _with_snow else None
+    _with_depth = [r for r in station_reports if r.get("depth_in") is not None]
+    st_depth = _with_depth[0] if _with_depth else None
     rows = [
         {"label": "Snow depth on ground (modelled)", "c1": f"{depth_in:.1f}", "c2": f"{depth_mm:.0f}" if depth_mm and not np.isnan(depth_mm) else "—", "highlight": True},
         {"label": "Snow-water-equiv (SWE)", "c1": f"{swe_in:.2f}", "c2": f"{swe_mm:.0f}" if swe_mm and not np.isnan(swe_mm) else "—"},
         {"label": "Roof load (from SWE)", "c1": f"{load_psf:.1f}", "c2": "psf"},
-        {"label": "NEW snowfall, nearest station",
+        {"label": "Measured depth, NWS station",
+         "c1": f"{st_depth['depth_in']:.0f}" if st_depth else "—",
+         "c2": f"{st_depth['dist_mi']:.1f} mi" if st_depth else "—"},
+        {"label": "NEW snowfall, NWS station",
          "c1": f"{nearest_snow:.1f}" if nearest_snow is not None else "—",
-         "c2": f"{station_reports[0]['dist_mi']:.1f} mi" if station_reports else "—"},
+         "c2": f"{_with_snow[0]['dist_mi']:.1f} mi" if _with_snow else "—"},
     ]
 
     dk = (hc._THEME_DETECTED if detected else hc._THEME_CLEAR)["dark"]
@@ -306,16 +382,11 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
     finding = (f'Snow load of ≥ {thr} depth <span style="color:{dk};">'
                f'{"was present on this property" if detected else "was not present on this property"}'
                f'</span> on the date of loss.')
-    _new_txt = (f'nearest station reported <strong style="color:#06101f;">'
-                f'{nearest_snow:.1f}″</strong> of NEW snowfall'
-                if nearest_snow is not None else
-                'no nearby station reported new snowfall for this date')
     sub = (f'Snow depth ON THE GROUND at the property was '
            f'<strong style="color:#06101f;">{depth_in:.1f}″</strong> '
            f'(roof load ≈ <strong style="color:#06101f;">{load_psf:.0f} psf</strong>), '
            f'{"at or above" if detected else "below"} the {thr} threshold. Depth includes '
-           f'any older snowpack and is not a statement that snow fell on this date — '
-           f'{_new_txt}.')
+           f'any older snowpack; measured station values are in the table below.')
 
     return {
         "reportId": report_id, "dateGenerated": f"{generated:%B %d, %Y}",
@@ -333,8 +404,9 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
         "resultsTitle": "Snow Depth &amp; Roof Load",
         "colHeaders": {"label": "Measure", "c1": "in", "c2": "mm / dist"},
         "rows": rows,
-        "resultsFootnote": ("Depth and SWE are SNODAS MODEL values at the property; new "
-                            "snowfall is a station MEASUREMENT that may be miles away. "
+        "resultsFootnote": ("Depth and SWE are SNODAS MODEL values at the property and are "
+                            "not a statement that snow fell on this date; station rows are "
+                            "NWS MEASUREMENTS that may be miles away. "
                             + conf["quality"]["note"]),
         "mapTitle": "Snow Depth Footprint", "mapDataUri": map_data_uri,
         "mapCaption": f"Estimated snow depth — NOAA SNODAS, {date_of_loss:%B %d, %Y}.",
@@ -346,7 +418,8 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
             "Snow depth and snow-water-equivalent (SWE) are sampled from NOAA's SNODAS "
             "model (National Operational Hydrologic Remote Sensing Center), a ~1 km daily "
             "snow analysis. Roof load is derived from SWE (1 mm SWE ≈ 0.205 lb/ft²). New "
-            "snowfall is the nearest COOP/CoCoRaHS station's measured 24-hour total. SNODAS "
+            "snowfall and measured depth come from the nearest official NWS daily climate "
+            "report (CLI). SNODAS "
             "is a model ESTIMATE; station snowfall is a direct measurement that may be miles "
             "from the property."),
         "disclaimerText": (
@@ -360,16 +433,25 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
         "_detected": detected, "_depth_in": round(depth_in, 1),
         "_load_psf": load_psf, "_confidence": conf,
         "_new_snow_in": nearest_snow, "_quality": conf["quality"],
+        "_station_depth_in": (st_depth or {}).get("depth_in"),
     }
 
 
 def _snow_corrob_line(reports):
     if not reports:
-        return "No nearby station snowfall reports were available for this date."
-    parts = [f"{r['snow_in']:.1f}″ — {r['dist_mi']:.1f} mi {r['dir']} ({r['source']})"
-             for r in reports[:3]]
+        return ("No official NWS climate-site report was available near this "
+                "property for this date.")
+    parts = []
+    for r in reports[:3]:
+        bits = []
+        if r.get("depth_in") is not None:
+            bits.append(f"{r['depth_in']:.0f}\u2033 on ground")
+        if r.get("snow_in") is not None:
+            bits.append(f"{r['snow_in']:.1f}\u2033 new")
+        parts.append(f"{' / '.join(bits) or 'report'} \u2014 "
+                     f"{r.get('name', '')} {r['dist_mi']:.0f} mi {r['dir']}")
     extra = f" +{len(reports) - 3} more" if len(reports) > 3 else ""
-    return "Nearby snowfall: " + "; ".join(parts) + extra + "."
+    return "Official measurements: " + "; ".join(parts) + extra + "."
 
 
 def render(data: dict, out_pdf: str, font_dir: str | None = None) -> str:

@@ -20,7 +20,7 @@ import snow_core as sc
 PERILS = ("hail", "wind", "snow")
 
 #  Shared with pipeline.py so all three perils stamp the same methodology version.
-METHODOLOGY_VERSION = "v2.4"
+METHODOLOGY_VERSION = "v2.5"
 _GEOCODE_LABEL = {"rooftop": "Rooftop", "interpolated": "Address range",
                   "street": "Street centreline", "area": "Area centroid",
                   "manual": "Manual coordinates", "unknown": "Unspecified"}
@@ -82,7 +82,7 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
         }
 
     # ---- shared setup for wind/snow ----
-    hc.validate_date_of_loss(date_of_loss)
+    hc.validate_date_of_loss(date_of_loss, peril=peril)   # per-peril floors (F3)
     loc = hc.resolve_location(address, manual_lat, manual_lon)
     us, ue, tz = hc.local_day_utc_window(date_of_loss, loc["lat"], loc["lon"])
     # D4, same defect the hail report had: hash() is randomised per process, so
@@ -107,13 +107,41 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
         data["generatedUtc"] = f"{dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M UTC}"
         pdf = os.path.join(out_dir, f"Clear_Claims_Wind_Report_{rid}.pdf")
         wc.render(data, pdf, font_dir=fd)
-        peak = data["_peak_mph"]
+
+        # F5: the old headline blended measured station gusts with spotter
+        # REPORTS into one "Peak gust N mph", so an estimate 15 miles away
+        # could read as an instrument reading. State the basis of every number.
+        m_peak = data.get("_measured_peak_mph")
+        r_peak = data.get("_reported_peak_mph")
+        p_id = data.get("_peak_station_id") or "station"
+        p_dist = data.get("_peak_station_dist_mi")
+        if m_peak is not None:
+            headline = (f"Measured {m_peak:.0f} mph at {p_id}"
+                        + (f" ({p_dist:.1f} mi)" if p_dist is not None else ""))
+            if r_peak is not None and r_peak > m_peak:
+                headline += f"; {r_peak:.0f} mph reported nearby"
+        elif r_peak is not None:
+            headline = f"No station measurement; {r_peak:.0f} mph reported nearby"
+        else:
+            headline = "No wind measurement available near this property"
+
         return {
             "peril": "wind", "pdf_path": pdf, "report_id": rid,
             "detected": data["_detected"], "confidence": data["_confidence"],
             "data_source": "NOAA ASOS + NWS/SPC reports", "n_reports": len(reports),
-            "headline": (f"Peak gust {peak:.0f} mph" if peak is not None else "No measured gust"),
-            "metrics": {"peak_mph": peak, "n_stations": len(stations)},
+            "headline": headline,
+            "badge": data.get("statusText"),
+            "radar_quality": data.get("measurementQuality"),
+            "geocode_precision": loc.get("precision"),
+            "metrics": {"peak_mph": data.get("_peak_mph"),
+                        "measured_peak_mph": m_peak,
+                        "reported_peak_mph": r_peak,
+                        "peak_station": data.get("_peak_station_id"),
+                        "peak_station_dist_mi": p_dist,
+                        "nearest_station_mph": data.get("_nearest_mph"),
+                        "nearest_station": data.get("_nearest_id"),
+                        "nearest_dist_mi": data.get("_nearest_dist_mi"),
+                        "n_stations": len(stations)},
             "location": loc, "threshold": thr,
         }
 
@@ -159,8 +187,14 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
     return {
         "peril": "snow", "pdf_path": pdf, "report_id": rid,
         "detected": data["_detected"], "confidence": data["_confidence"],
-        "data_source": "NOAA SNODAS + station snowfall", "n_reports": len(stations),
-        "headline": f'Snow depth {data["_depth_in"]:.1f}" · load {data["_load_psf"]:.0f} psf',
-        "metrics": {"depth_in": data["_depth_in"], "load_psf": data["_load_psf"]},
+        "data_source": "NOAA SNODAS + NWS station reports", "n_reports": len(stations),
+        "headline": (f'Modelled depth {data["_depth_in"]:.1f}" on ground '
+                     f'· load {data["_load_psf"]:.0f} psf'),
+        "badge": data.get("statusText"),
+        "radar_quality": data.get("measurementQuality"),
+        "geocode_precision": loc.get("precision"),
+        "metrics": {"depth_in": data["_depth_in"], "load_psf": data["_load_psf"],
+                    "new_snow_in": data.get("_new_snow_in"),
+                    "station_depth_in": data.get("_station_depth_in")},
         "location": loc, "threshold": thr,
     }

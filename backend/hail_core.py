@@ -67,19 +67,33 @@ _TS_RE = re.compile(r"_(\d{8})-(\d{6})\.grib2(?:\.gz)?$")
 #  1.  DATE VALIDATION + UTC TIME WINDOW
 # =============================================================================
 
-def validate_date_of_loss(date_of_loss: dt.date, today: dt.date | None = None) -> None:
+#  Each peril's data reaches back a different distance (F3, 2026-08-27):
+#    hail — MRMS MESH archive begins 2020-10-14 (verified: 2018/2019 hold no
+#           MESH at all, and early 2020 has ~2 files/day, unusable).
+#    wind — ASOS/AWOS station records via IEM reach back decades; LSR/SPC
+#           corroboration is thin before the mid-2000s. Floor: 2005-01-01.
+#    snow — SNODAS daily grids begin 2003-09-30. Floor: 2003-10-01.
+PERIL_FLOORS = {
+    "hail": (dt.date(2020, 10, 14), "national hail-radar (MRMS MESH) archive"),
+    "wind": (dt.date(2005, 1, 1), "wind station and storm-report archive"),
+    "snow": (dt.date(2003, 10, 1), "national snow analysis (SNODAS)"),
+}
+
+
+def validate_date_of_loss(date_of_loss: dt.date, today: dt.date | None = None,
+                          peril: str = "hail") -> None:
     """Raise a friendly error if the date can't be served by the AWS archive.
 
     * Too early  -> before the 2020-10-14 archive start.
     * In future  -> obviously no radar exists yet.
     """
     today = today or dt.date.today()
-    if date_of_loss < IEM_ARCHIVE_START:
+    floor, label = PERIL_FLOORS.get(peril, PERIL_FLOORS["hail"])
+    if date_of_loss < floor:
         raise ValueError(
-            f"Date of loss {date_of_loss:%Y-%m-%d} is before the national hail-radar "
-            f"archive begins ({IEM_ARCHIVE_START:%B %d, %Y}). Hail cannot be verified "
-            f"from radar for this date \u2014 the data does not exist, rather than "
-            f"being temporarily unavailable."
+            f"Date of loss {date_of_loss:%Y-%m-%d} is before the {label} begins "
+            f"({floor:%B %d, %Y}). This date cannot be verified \u2014 the data does "
+            f"not exist, rather than being temporarily unavailable."
         )
     if date_of_loss > today:
         raise ValueError(
@@ -828,7 +842,7 @@ def classify_hail(peak_in, cell_in, threshold_in, coverage_state="ok"):
     if peak_in <= 0.0:
         band, theme = "none", "clear"
         badge = "None Detected"
-        verdict = "Radar shows no hail signature at this property on this date."
+        verdict = "Radar shows no hail signature at or near this property on this date."
         detail = ("A radar-based negative is weaker evidence than a positive. "
                   "Small or brief hail can fall below what the radar resolves."
                   + (coverage_caveat if coverage_state == "unknown" else "")
@@ -839,7 +853,7 @@ def classify_hail(peak_in, cell_in, threshold_in, coverage_state="ok"):
     elif peak_in < MESH_DISCRIMINATION_FLOOR_IN:
         band, theme = "trace", "caution"
         badge = "Trace / Indeterminate"
-        verdict = "Damaging hail is UNLIKELY to have occurred at this property."
+        verdict = "Damaging hail is UNLIKELY to have occurred near this property."
         detail = ("The radar value is below the level at which MESH can "
                   "distinguish hail from ordinary convection. The figure is "
                   "reported for completeness, not as verified hail.")
@@ -1062,7 +1076,8 @@ _QUALITY_RANK = {"Excellent": 4, "Good": 3, "Fair": 2, "Poor": 1,
 
 
 def assess_confidence(point_in, ring_max_in, reports, threshold_in, source=None,
-                      coverage_state="unknown", quality_grade="Not assessed"):
+                      coverage_state="unknown", quality_grade="Not assessed",
+                      n_warnings=0):
     """Combine radar reading, radar QUALITY and ground reports into a level.
 
     Returns {level, color, note, n_reports}. level is None when coverage is
@@ -1146,6 +1161,17 @@ def assess_confidence(point_in, ring_max_in, reports, threshold_in, source=None,
     elif rank is None:
         level = {"High": "Moderate", "Moderate": "Moderate", "Low": "Low"}[level]
         note += qual_txt
+
+    # F8 (found on Ethan's first real report): a severe thunderstorm or tornado
+    # warning was in force at this property on the date of loss. That is a human
+    # forecaster's real-time judgement that this county was in danger. It does
+    # not put hail at the address \u2014 but a NEGATIVE should not claim High
+    # confidence while page 2 of the same report shows a WARNED badge.
+    if not detected and n_warnings and level == "High":
+        level = "Moderate"
+        note += (f" Note: {n_warnings} severe weather warning(s) covered this "
+                 f"property on the date of loss, so severe weather was in the "
+                 f"area even though radar shows no hail at this location.")
 
     color = {"High": "#28a678", "Moderate": "#e6a117", "Low": "#d94f3d"}[level]
     return {"level": level, "color": color, "note": note, "n_reports": n}
@@ -1620,6 +1646,23 @@ def build_context_page(data: dict) -> str:
     wind = ctx.get("wind") or {}
     summ = prior.get("summary") or {}
 
+    # Times on this card are shown in the PROPERTY's local time (F6): a bare
+    # "02:42 UTC" reads like the middle of the night when it was actually
+    # 8:42 PM the previous evening locally.
+    tz_name = data.get("tzName") or "UTC"
+    try:
+        from zoneinfo import ZoneInfo
+        _tz = ZoneInfo(tz_name)
+    except Exception:
+        _tz = dt.timezone.utc
+
+    def _local(t):
+        try:
+            lt = t.astimezone(_tz)
+            return f'{lt:%b %d, %I:%M %p} {lt.tzname() or ""}'.replace(" 0", " ")
+        except Exception:
+            return f"{t:%H:%M} UTC"
+
     # ---- same-day: NWS warnings -----------------------------------------
     if not warn.get("ok"):
         w_pill = '<span class="pill" style="background:#5a6b7e;">Unavailable</span>'
@@ -1628,7 +1671,7 @@ def build_context_page(data: dict) -> str:
     elif warn.get("warned"):
         names = []
         for x in warn["warnings"][:3]:
-            names.append(f'{x["name"]} &middot; {x["issued"]:%H:%M} UTC')
+            names.append(f'{x["name"]} &middot; issued {_local(x["issued"])}')
         extra = (f' &nbsp;+{len(warn["warnings"]) - 3} more'
                  if len(warn["warnings"]) > 3 else "")
         w_pill = '<span class="pill" style="background:#d94f3d;">Warned</span>'
@@ -1825,9 +1868,19 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
     threshold_in = float(data.get("thresholdInches", 0.75))
     res = data["results"]
 
+    no_cov = (cls.get("band") == "no_coverage")
+
     def num(v, dec=2):
-        """Format a reading, or an em-dash when there is no radar data."""
-        return f"{v:.{dec}f}" if v is not None else "\u2014"
+        """Format a reading \u2014 an em-dash when there is no radar data.
+
+        F2: when NOAA's radar quality index says the radar could not see this
+        point, the sampled values are meaningless and the verdict refuses to
+        state a size. The table must refuse too: printing 0.00 next to
+        "no size can be stated" is a contradiction on one page.
+        """
+        if no_cov or v is None:
+            return "\u2014"
+        return f"{v:.{dec}f}"
 
     def phrase(d):
         if d.get("in") is None:
@@ -1858,11 +1911,17 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
             i=num(d.get("in")), m=num(d.get("mm"), 0))
         for label, d, hot in _rows)
 
-    table_caption = data.get("tableCaption") or (
-        "Each row is the PEAK radar-estimated diameter within that radius \u2014 not an "
-        "average, and not a measurement at the address. The MRMS grid is &asymp;1 km, so "
-        "&lsquo;nearest grid cell&rsquo; already covers roughly a city block. A larger "
-        "radius can only ever report the same value or a bigger one.")
+    if no_cov:
+        table_caption = data.get("tableCaption") or (
+            "No values are stated because NOAA&rsquo;s radar quality index shows the "
+            "radar network could not see this location on this date. An absence of "
+            "data is not an absence of hail.")
+    else:
+        table_caption = data.get("tableCaption") or (
+            "Each row is the PEAK radar-estimated diameter within that radius \u2014 not an "
+            "average, and not a measurement at the address. The MRMS grid is &asymp;1 km, so "
+            "&lsquo;nearest grid cell&rsquo; already covers roughly a city block. A larger "
+            "radius can only ever report the same value or a bigger one.")
 
     # ---- Confidence chip: suppressed entirely when coverage is unusable ---
     _conf_level = data.get("confidenceLevel") or ""

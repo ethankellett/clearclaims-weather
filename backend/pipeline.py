@@ -19,7 +19,7 @@ import storm_context as sctx
 
 #  Bumped whenever the numbers on the report change meaning. Printed in the PDF
 #  footer so any archived report can be traced to the logic that produced it.
-METHODOLOGY_VERSION = "v2.4"
+METHODOLOGY_VERSION = "v2.5"
 
 
 _GEOCODE_LABEL = {"rooftop": "Rooftop", "interpolated": "Address range",
@@ -148,14 +148,10 @@ def generate_report(
                                          date_of_loss, radius_miles=12.0)
     except Exception:
         reports = []
-    confidence = hc.assess_confidence(peak_in, rings[1]["in"], reports, threshold_in,
-                                      source, coverage_state=coverage["state"],
-                                      quality_grade=coverage["quality_grade"])
-    corrob_line = hc.corroboration_line(reports, 12.0, coverage["state"])
-
-    # 4c. Storm context for the supplement page (PR 3). All three lookups are
-    # best-effort and individually guarded: a slow or broken endpoint costs that
-    # one card, never the report.
+    # 4c. Storm context (PR 3) — gathered BEFORE confidence (F8) so that a
+    # same-day severe weather warning can temper a confident negative. All three
+    # lookups are best-effort and individually guarded: a slow or broken
+    # endpoint costs that one card, never the report.
     if _context is not None:
         context = _context
     elif with_context:
@@ -166,6 +162,13 @@ def generate_report(
             context = {}
     else:
         context = {}
+    _n_warn = len(((context.get("warnings") or {}).get("warnings")) or [])
+
+    confidence = hc.assess_confidence(peak_in, rings[1]["in"], reports, threshold_in,
+                                      source, coverage_state=coverage["state"],
+                                      quality_grade=coverage["quality_grade"],
+                                      n_warnings=_n_warn)
+    corrob_line = hc.corroboration_line(reports, 12.0, coverage["state"])
 
     # 5. footprint map
     map_path = os.path.join(out_dir, "hail_footprint.png")
@@ -187,9 +190,10 @@ def generate_report(
         "propertyAddress": loc["label"],
         "claimRef": claim_ref or "\u2014",
         "coordinates": _coord_str(loc["lat"], loc["lon"]),
+        # "(index N)" so the 0-1 RQI value can never be misread as inches.
         "radarQuality": (
             f'{coverage["quality_grade"]}'
-            + (f' ({coverage["quality_value"]:.2f})'
+            + (f' (index {coverage["quality_value"]:.2f})'
                if coverage.get("quality_value") is not None else "")),
         "geocodeQuality": _geocode_label(loc),
         "contactUrl": contact_url, "contactCity": contact_city,
@@ -211,6 +215,7 @@ def generate_report(
         "confidenceNote": confidence["note"],
         "corroborationLine": corrob_line,
         "context": context,
+        "tzName": tz_name,
     }
     html = hc.build_report_html(data, font_dir=font_dir)
     pdf_path = os.path.join(out_dir, f"Clear_Claims_Hail_Report_{report_id}.pdf")

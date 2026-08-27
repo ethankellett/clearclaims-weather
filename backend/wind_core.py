@@ -369,6 +369,12 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
     measured_peak = max((s["gust_mph"] for s in meas), default=None)
     nearest = min(meas, key=lambda s: s.get("dist_mi", 1e9)) if meas else None
     nearest_dist = nearest.get("dist_mi") if nearest else None
+    # The station that actually MEASURED the peak. Found live on 2026-08-27
+    # (Sioux Falls derecho report): the finding paired the peak gust (97 mph,
+    # measured at MDS, 37 mi away) with the NEAREST station's name and distance
+    # (FSD, 2.6 mi) — attributing one station's reading to another. Every
+    # number must be attributed to the instrument that produced it.
+    peak_station = (max(meas, key=lambda s: s["gust_mph"]) if meas else None)
 
     rep_speeds = [r["speed_mph"] for r in reports if r.get("speed_mph") is not None]
     reported_peak = max(rep_speeds) if rep_speeds else None
@@ -391,10 +397,12 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
     if nearest is not None:
         rows.append({"label": f"Measured — {nearest.get('name', nearest.get('id',''))}",
                      "c1": f"{nearest['gust_mph']:.0f}",
-                     "c2": f"{nearest['dist_mi']:.1f} mi", "highlight": True})
+                     "c2": f"{nearest['dist_mi']:.1f} mi",
+                     "highlight": peak_station is nearest})
     for st in [x for x in meas if x is not nearest][:2]:
-        rows.append({"label": f"Measured — {st.get('id','')}",
-                     "c1": f"{st['gust_mph']:.0f}", "c2": f"{st['dist_mi']:.1f} mi"})
+        rows.append({"label": f"Measured — {st.get('name', st.get('id',''))}",
+                     "c1": f"{st['gust_mph']:.0f}", "c2": f"{st['dist_mi']:.1f} mi",
+                     "highlight": st is peak_station})
     if not meas:
         rows.append({"label": "Measured — none available", "c1": "—", "c2": "—"})
     if reports:
@@ -415,19 +423,23 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
                    f'{"was recorded" if detected else "was not recorded"}</span> '
                    f'near this property.')
         bits = []
-        if measured_peak is not None:
+        if nearest is not None:
             bits.append(
-                f'Peak <b>measured</b> gust <strong style="color:#06101f;">'
-                f'{measured_peak:.0f} mph</strong> at '
-                f'{nearest.get("id", "the nearest station")}'
-                + (f', {nearest_dist:.1f} mi away' if nearest_dist is not None else ''))
+                f'Nearest station {nearest.get("id", "")} '
+                f'({nearest["dist_mi"]:.1f} mi) measured '
+                f'<strong style="color:#06101f;">{nearest["gust_mph"]:.0f} mph</strong>')
+            if peak_station is not None and peak_station is not nearest:
+                bits.append(
+                    f'the highest nearby measurement was '
+                    f'<strong style="color:#06101f;">{peak_station["gust_mph"]:.0f} mph</strong> '
+                    f'at {peak_station.get("id", "")} ({peak_station["dist_mi"]:.1f} mi)')
         else:
             bits.append('No official station measured a gust for this date')
         if reported_peak is not None:
             bits.append(f'peak <b>reported</b> gust {reported_peak:.0f} mph nearby')
         sub = ("; ".join(bits) +
-               f'. Threshold is {thr}. Measured gusts are instrument readings at the '
-               f'station, not at the address.')
+               f'. Threshold is {thr}. Each measured gust is an instrument reading at '
+               f'that station, not at the address.')
 
     return {
         "reportId": report_id, "dateGenerated": f"{generated:%B %d, %Y}",
@@ -467,6 +479,10 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
         "_detected": detected, "_peak_mph": peak, "_confidence": conf,
         "_measured_peak_mph": measured_peak, "_reported_peak_mph": reported_peak,
         "_nearest_dist_mi": nearest_dist, "_quality": quality,
+        "_nearest_mph": (nearest or {}).get("gust_mph"),
+        "_nearest_id": (nearest or {}).get("id"),
+        "_peak_station_id": (peak_station or {}).get("id"),
+        "_peak_station_dist_mi": (peak_station or {}).get("dist_mi"),
         "measurementQuality": (
             f'{quality["grade"]}'
             + (f' ({nearest_dist:.1f} mi)' if nearest_dist is not None else '')),

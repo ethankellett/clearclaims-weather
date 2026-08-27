@@ -29,14 +29,40 @@ def email_enabled() -> bool:
     return bool(EMAIL_FROM and (RESEND_API_KEY or SMTP_HOST))
 
 
-def build_email_html(meta: dict, report_url: str) -> str:
+def email_verdict(meta: dict):
+    """Peril-aware verdict text + color for the email (F12, 2026-08-27).
+
+    The old version hardcoded "Hail Detected"/"No Hail Detected" for every
+    peril (wind and snow emails talked about hail) and showed a green
+    "No Hail Detected" even when radar coverage was missing entirely.
+    """
+    peril = (meta.get("peril") or "hail").lower()
+    badge = meta.get("badge") or ""
+    coverage = meta.get("coverage")
     detected = meta.get("detected")
-    verdict = "Hail Detected" if detected else "No Hail Detected"
-    color = "#d94f3d" if detected else "#28a678"
+
+    if peril == "hail" and coverage == "none":
+        return "Radar Coverage Unavailable", "#5a6b7e"
+    if badge:
+        color = {"Coverage Unavailable": "#5a6b7e"}.get(badge)
+        if color is None:
+            color = "#d94f3d" if detected else (
+                "#e6a117" if badge in ("Trace / Indeterminate", "Hail Indicated")
+                else "#28a678")
+        return badge, color
+    names = {"hail": "Hail", "wind": "Damaging Wind", "snow": "Significant Snow Load"}
+    n = names.get(peril, "Weather")
+    return (f"{n} Detected", "#d94f3d") if detected else (f"{n} Not Detected", "#28a678")
+
+
+def build_email_html(meta: dict, report_url: str) -> str:
+    verdict, color = email_verdict(meta)
+    peril = (meta.get("peril") or "hail").title()
     addr = meta.get("address", "the property")
-    val = meta.get("at_property_in")
-    thr = meta.get("threshold_in")
     dol = meta.get("date_of_loss", "")
+    headline = meta.get("headline") or ""
+    conf = meta.get("confidence")
+    conf_line = f" &nbsp;&middot;&nbsp; Confidence: {conf}" if conf else ""
     return f"""\
 <div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:auto;color:#1f2c3d;">
   <div style="background:#06101f;color:#fff;padding:18px 22px;border-radius:8px 8px 0 0;">
@@ -44,15 +70,15 @@ def build_email_html(meta: dict, report_url: str) -> str:
     <div style="font-size:12px;color:#8aa0b8;font-style:italic;">Fairness in every claim</div>
   </div>
   <div style="border:1px solid #d9e4f0;border-top:0;border-radius:0 0 8px 8px;padding:22px;">
-    <p style="margin:0 0 6px;">Your Radar-Based Hail Verification Report is ready.</p>
+    <p style="margin:0 0 6px;">Your {peril} Verification Report is ready.</p>
     <p style="font-size:20px;font-weight:bold;color:{color};margin:10px 0 4px;">{verdict}</p>
     <p style="font-size:13px;color:#5a6b7e;margin:0 0 14px;">
-      {addr}<br>Date of loss: {dol} &nbsp;·&nbsp; Max hail at property: {val}&quot; (threshold {thr}&quot;)
+      {addr}<br>Date of loss: {dol}<br>{headline}{conf_line}
     </p>
     <a href="{report_url}" style="display:inline-block;background:#2b7de9;color:#fff;
        text-decoration:none;font-weight:bold;padding:11px 20px;border-radius:7px;">View / download the PDF</a>
     <p style="font-size:11px;color:#8a99ab;margin:18px 0 0;line-height:1.5;">
-      Estimate derived from NOAA MRMS MESH radar data, for informational purposes only —
+      Derived from official NOAA data, for informational purposes only \u2014
       not a physical inspection or guarantee of damage. The PDF is also attached.
     </p>
   </div>
@@ -67,8 +93,9 @@ def send_report_email(to: str, meta: dict, report_url: str,
     if not to:
         return False, "no recipient"
 
-    subject = ("Hail Detected — " if meta.get("detected") else "Hail Report — ") + \
-              meta.get("address", "your property")
+    verdict, _ = email_verdict(meta)
+    peril = (meta.get("peril") or "hail").title()
+    subject = f"{peril} Report ({verdict}) — " + meta.get("address", "your property")
     html = build_email_html(meta, report_url)
 
     try:
