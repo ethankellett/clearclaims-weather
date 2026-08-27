@@ -20,7 +20,7 @@ import snow_core as sc
 PERILS = ("hail", "wind", "snow")
 
 #  Shared with pipeline.py so all three perils stamp the same methodology version.
-METHODOLOGY_VERSION = "v2.3"
+METHODOLOGY_VERSION = "v2.4"
 _GEOCODE_LABEL = {"rooftop": "Rooftop", "interpolated": "Address range",
                   "street": "Street centreline", "area": "Area centroid",
                   "manual": "Manual coordinates", "unknown": "Unspecified"}

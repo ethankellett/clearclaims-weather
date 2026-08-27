@@ -1602,7 +1602,7 @@ def soft_wrap_html(text, limit=58):
 
 #  Cap on printed history rows; the rest are summarised as "+N more" so the
 #  supplement can never run to a third page.
-MAX_PRINTED_EVENTS = 8
+MAX_PRINTED_EVENTS = 12
 
 
 def build_context_page(data: dict) -> str:
@@ -1669,30 +1669,44 @@ def build_context_page(data: dict) -> str:
     else:
         largest = summ.get("largest_in")
         ds = summ.get("days_since_severe")
+        # Ordered to answer the question people actually ask first: when did it
+        # last hail near here, and how close.
+        _la_date = summ.get("last_any_date")
+        _la_dist, _la_dir = summ.get("last_any_dist_mi"), summ.get("last_any_dir")
+        _ls_date = summ.get("last_severe_date")
         stats = [
+            ("Most recent hail<br>within %g mi" % inner,
+             (_la_date or "None"),
+             (f'{summ["last_any_size_in"]:.2f}\u2033 &middot; {_la_dist:.1f} mi {_la_dir}'
+              if _la_date and _la_dist is not None else f"in {summ.get('months', 24)} months")),
+            ("Most recent<br>&ge;1.00\u2033 within %g mi" % inner,
+             (_ls_date or "None"),
+             (f"{ds} days before loss" if ds is not None else "none in window")),
             ("Largest report<br>within %g mi" % inner,
              f'{largest:.2f}\u2033' if largest else "None",
              (summ.get("largest_date") or "in window") if largest else f"in {summ.get('months', 24)} months"),
-            ("Reports &ge; %.2f\u2033<br>within %g mi" % (summ.get("min_size_in", 0.75), inner),
-             str(summ.get("count_inner", 0)), "events"),
-            ("Reports &ge; %.2f\u2033<br>within %g mi" % (summ.get("min_size_in", 0.75), outer),
-             str(summ.get("count_outer", 0)), "events"),
-            ("Since last<br>&ge;1.00\u2033 within %g mi" % inner,
-             (str(ds) if ds is not None else "\u2014"),
-             ("days" if ds is not None else "none in window")),
+            ("Reports &ge; %.2f\u2033 within<br>%g mi / %g mi" % (summ.get("min_size_in", 0.75), inner, outer),
+             f'{summ.get("count_inner", 0)} / {summ.get("count_outer", 0)}', "events"),
         ]
         stats_html = '<div class="stats">' + "".join(
             f'<div class="s"><div class="k">{k}</div><div class="v">{v}</div>'
             f'<div class="u">{u}</div></div>' for k, v, u in stats) + '</div>'
 
-        evs = prior.get("events") or []
+        # Sort MOST RECENT FIRST for display. The underlying list is ordered
+        # largest-first (that drives the "largest" stat), but a size-ordered
+        # table buries the thing a reader wants: when it last hailed here. On a
+        # big hail day dozens of spotters call in, so a size sort can fill the
+        # whole table with one date and hide everything since.
+        evs = sorted(prior.get("events") or [],
+                     key=lambda e: (e.get("date", ""), -e.get("dist_mi", 0)),
+                     reverse=True)
         shown = evs[:MAX_PRINTED_EVENTS]
         if shown:
             body = "".join(
-                '<tr><td>{d}</td><td class="num">{s:.2f}</td><td class="num">{km:.1f}</td>'
-                '<td>{dir}</td><td>{c}</td></tr>'.format(
+                '<tr><td>{d}</td><td class="num">{s:.2f}</td><td class="num">{km:.1f} mi {dir}</td>'
+                '<td>{c}</td></tr>'.format(
                     d=e["date"], s=e["size_in"], km=e["dist_mi"], dir=e["dir"],
-                    c=clip_text(e.get("city") or e.get("county") or "", 26))
+                    c=clip_text(e.get("city") or e.get("county") or "", 30))
                 for e in shown)
             # Keep the overflow line OUTSIDE the table: as a colspan row inside
             # <tbody> WeasyPrint floated it past the caption instead of keeping
@@ -1703,8 +1717,15 @@ def build_context_page(data: dict) -> str:
                     if len(evs) > len(shown) else "")
             rows_html = (
                 '<table><thead><tr><th>Date</th><th class="num">Size (in)</th>'
-                '<th class="num">Dist (mi)</th><th>Dir</th><th>Nearest place</th>'
-                '</tr></thead><tbody>' + body + '</tbody></table>' + more)
+                '<th class="num">From this property</th>'
+                '<th>How the NWS logged the location</th>'
+                '</tr></thead><tbody>' + body + '</tbody></table>' + more
+                + '<div class="note" style="margin-top:5px;">Newest first. '
+                  '<b>From this property</b> is measured from the address on page 1. '
+                  'The final column is the National Weather Service&rsquo;s own wording for '
+                  'where the spotter was, given relative to a nearby landmark &mdash; not '
+                  'relative to this property. A single storm often produces many reports '
+                  'on the same date from different spotters.</div>')
         else:
             rows_html = ('<div class="note">No official hail report of '
                          f'{summ.get("min_size_in", 0.75):.2f}\u2033 or greater was logged '

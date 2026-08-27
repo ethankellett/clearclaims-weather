@@ -76,10 +76,13 @@ DOL = dt.date(2024, 6, 3)
 def ctx_sample(n_events=12, warned=True, gust=71.0, prior_ok=True):
     """A realistic PR3 context block for offline rendering."""
     import datetime as _d
+    # Mimic the real shape: the BIGGEST stones all land on one early date (a big
+    # hail day produces many spotter calls), while the MOST RECENT event is small.
     evs = [{"date": f"2022-{(i % 12) + 1:02d}-14", "size_in": round(2.5 - i * 0.12, 2),
             "dist_mi": 0.6 + i * 0.7, "dir": ["N", "NE", "E", "SE"][i % 4],
             "city": f"Test Locality {i}", "county": "PENNINGTON",
             "source": "Public", "lat": CY, "lon": CX} for i in range(n_events)]
+    evs = sorted(evs, key=lambda e: -e["size_in"])
     return {
         "prior_hail": {
             "ok": prior_ok, "events": evs if prior_ok else [],
@@ -89,6 +92,9 @@ def ctx_sample(n_events=12, warned=True, gust=71.0, prior_ok=True):
                          "largest_in": 2.5, "largest_date": "2022-01-14",
                          "largest_dist_mi": 0.6, "count_inner": 6,
                          "count_outer": n_events, "days_since_severe": 141,
+                         "last_severe_date": "2024-01-14", "last_any_date": "2022-12-14",
+                         "last_any_size_in": 1.18, "last_any_dist_mi": 8.3,
+                         "last_any_dir": "SE",
                          "n_raw": n_events + 4, "n_below_cutoff": 4, "months": 24}
                         if prior_ok else {}),
         },
@@ -296,7 +302,7 @@ t = pdf_text(r["pdf_path"])
 check("PDF prints the address-match class", "manual coordinates" in t.lower())
 
 print("\n=== 14. STORM CONTEXT SUPPLEMENT (PR 3) ===")
-r = run("context", blob(1.40), context=ctx_sample())
+r = run("context", blob(1.40), context=ctx_sample(n_events=16))
 t = pdf_text(r["pdf_path"])
 import subprocess as _sp
 pg = _sp.run(["pdfinfo", r["pdf_path"]], capture_output=True, text=True).stdout
@@ -313,7 +319,7 @@ check("measured gust shown", "71 mph" in t)
 check("gust labelled a measurement not an estimate", "instrument" in t.lower())
 check("largest prior report stat", "2.50" in t)
 check("days-since stat", "141" in t)
-check("event table capped at 8 rows + overflow line",
+check("event table capped with an overflow line",
       "further report(s) in this window are not listed" in t.lower())
 # the overflow line must sit with the table, not after the disclaimer
 _ti = t.lower().index("further report(s) in this window")
@@ -470,6 +476,43 @@ except ValueError as e:
     check("refusal names the real start date", "2020" in str(e))
 hc.validate_date_of_loss(dt.date(2023, 7, 11))   # must NOT raise
 check("in-range date still accepted", True)
+
+print("\n=== 19. PRIOR-HAIL TABLE READABILITY (reported by Ethan 2026-08-27) ===")
+# A real report for 1834 Red Dale Dr filled all 8 rows with 2020-07-10 because
+# the table sorted by SIZE. The most recent qualifying hail (2020-08-09) was in
+# the stat box but nowhere in the table - the one thing the reader wanted.
+import re as _re
+r = run("recency", blob(1.40), context=ctx_sample(n_events=12))
+t = pdf_text(r["pdf_path"])
+# PDF text extraction letter-spaces small-caps headings, so normalise.
+_n = lambda x: _re.sub(r"\s+", "", x).lower()
+nt = _n(t)
+
+_hdr = nt.index("howthenwsloggedthelocation")
+# bound to the table itself: the page footer also carries a YYYY-MM-DD date
+_tbl = t[t.index("SIZE (IN)"):]
+_tbl = _tbl[:_tbl.index("Newest first")]
+_rows = _re.findall(r"20\d\d-\d\d-\d\d", _tbl)
+check("table is ordered newest-first", _rows == sorted(_rows, reverse=True),
+      str(_rows[:6]))
+check("the most recent event is the first row", _rows[0] == "2022-12-14", str(_rows[:3]))
+check("every fixture date appears (cap raised to 12)", len(_rows) == 12, str(len(_rows)))
+check("distance and direction are one field",
+      _re.search(r"\d+\.\d mi (N|NE|E|SE|S|SW|W|NW)\b", t) is not None)
+check("distance is anchored to the property", "fromthisproperty" in nt)
+check("NWS wording labelled as the NWS's own", "howthenwsloggedthelocation" in nt)
+check("caption says newest first", "newestfirst" in nt)
+check("caption warns the last column is not relative to the property",
+      "notrelativetothisproperty" in nt)
+check("caption explains repeated dates",
+      "manyreports" in nt and "samedate" in nt)
+check("most-recent-hail stat present", "mostrecenthail" in nt)
+check("most-recent stat shows the date + size + bearing",
+      "2022-12-14" in t and "1.18" in t and "8.3 mi SE" in t)
+check("most-recent >=1.00in stat shows its own date", "2024-01-14" in t)
+check("still exactly 2 pages",
+      "Pages:           2" in _sp.run(["pdfinfo", r["pdf_path"]],
+                                      capture_output=True, text=True).stdout)
 
 print(f"\n{'='*60}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

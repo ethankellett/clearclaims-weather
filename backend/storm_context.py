@@ -126,13 +126,25 @@ def fetch_prior_hail(lat, lon, date_of_loss, months=PRIOR_MONTHS,
     largest = max(within_inner, key=lambda e: e["size_in"], default=None)
     severe_inner = [e for e in within_inner if e["size_in"] >= 1.00]
 
-    days_since = None
+    days_since, last_severe_date = None, None
     if severe_inner:
         try:
             latest = max(dt.date.fromisoformat(e["date"]) for e in severe_inner)
             days_since = (date_of_loss - latest).days
+            last_severe_date = latest.isoformat()
         except Exception:
-            days_since = None
+            days_since, last_severe_date = None, None
+
+    # The most recent qualifying report of ANY size within the inner radius.
+    # "When did it last hail near here?" is the question people actually ask,
+    # and it is not the same as "what was the biggest".
+    last_any_date, last_any = None, None
+    if within_inner:
+        try:
+            last_any = max(within_inner, key=lambda e: e["date"])
+            last_any_date = last_any["date"]
+        except Exception:
+            last_any = None
 
     out["ok"] = True
     out["events"] = printable
@@ -144,6 +156,11 @@ def fetch_prior_hail(lat, lon, date_of_loss, months=PRIOR_MONTHS,
         "count_inner": len(within_inner),
         "count_outer": len(within_outer),
         "days_since_severe": days_since,
+        "last_severe_date": last_severe_date,
+        "last_any_date": last_any_date,
+        "last_any_size_in": (last_any or {}).get("size_in"),
+        "last_any_dist_mi": (last_any or {}).get("dist_mi"),
+        "last_any_dir": (last_any or {}).get("dir"),
         "n_raw": len(deduped),
         "n_below_cutoff": len(deduped) - len(printable),
     }
