@@ -19,7 +19,7 @@ import storm_context as sctx
 
 #  Bumped whenever the numbers on the report change meaning. Printed in the PDF
 #  footer so any archived report can be traced to the logic that produced it.
-METHODOLOGY_VERSION = "v2.2"
+METHODOLOGY_VERSION = "v2.3"
 
 
 _GEOCODE_LABEL = {"rooftop": "Rooftop", "interpolated": "Address range",

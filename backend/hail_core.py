@@ -40,7 +40,15 @@ import numpy as np
 # the MRMS v12 upgrade on 2020-10-14. Before that, we fall back to the Iowa
 # Environmental Mesonet (IEM) MRMS archive, which reaches back to ~2014.
 ARCHIVE_START = dt.date(2020, 10, 14)        # AWS Open Data MRMS
-IEM_ARCHIVE_START = dt.date(2014, 7, 1)      # IEM MRMS archive (approximate floor)
+#  The old value here was 2014-07-01, which was simply wrong and made
+#  validate_date_of_loss accept dates we cannot serve — the request then died
+#  deep in the pipeline with a vague "try a nearby date". Checked against the
+#  IEM mirror on 2026-08-27: 2018 and 2019 hold NO MESH product at all (only
+#  precipitation), and although early/mid-2020 does carry MESH_Max_1440min it
+#  is roughly TWO files for a whole day, which cannot support a defensible
+#  24-hour maximum. So the honest floor is the AWS start date, and a request
+#  before it is now refused up front with a clear reason.
+IEM_ARCHIVE_START = ARCHIVE_START
 IEM_BASE = "https://mtarchive.geol.iastate.edu"
 
 # The exact public bucket + product folder we read.
@@ -68,9 +76,10 @@ def validate_date_of_loss(date_of_loss: dt.date, today: dt.date | None = None) -
     today = today or dt.date.today()
     if date_of_loss < IEM_ARCHIVE_START:
         raise ValueError(
-            f"Date of loss {date_of_loss:%Y-%m-%d} is before the available radar "
-            f"archives (which reach back to about {IEM_ARCHIVE_START:%Y-%m-%d}). "
-            f"This date can't be verified from radar."
+            f"Date of loss {date_of_loss:%Y-%m-%d} is before the national hail-radar "
+            f"archive begins ({IEM_ARCHIVE_START:%B %d, %Y}). Hail cannot be verified "
+            f"from radar for this date \u2014 the data does not exist, rather than "
+            f"being temporarily unavailable."
         )
     if date_of_loss > today:
         raise ValueError(
@@ -362,8 +371,17 @@ def download_url_gunzip(url: str, tmpdir: str, timeout: int = 60) -> str:
 
 
 def parse_iem_listing(html: str, folder_url: str):
-    """Pull MESH_Max_1440min .grib2.gz file URLs out of an IEM directory listing."""
-    names = re.findall(r'href="(MESH_Max_1440min_00\.50_\d{8}-\d{6}\.grib2\.gz)"', html)
+    """Pull the 24-hour-max MESH .grib2.gz URLs out of an IEM directory listing.
+
+    IEM changed its filename prefix at some point: modern days are named
+    MESH_Max_1440min_00.50_..., older ones MRMS_Max_1440min_00.50_.... The
+    original pattern only accepted the first, so the whole IEM fallback matched
+    ZERO files on older dates and silently reported "no radar files found".
+    Verified 2026-08-27: 2023-07-11 has 48 MESH_-prefixed files; 2020-06-20 has
+    2 MRMS_-prefixed ones.
+    """
+    names = re.findall(
+        r'href="((?:MESH|MRMS)_Max_1440min_00\.50_\d{8}-\d{6}\.grib2\.gz)"', html)
     base = folder_url if folder_url.endswith("/") else folder_url + "/"
     return [base + n for n in dict.fromkeys(names)]   # de-dup, keep order
 

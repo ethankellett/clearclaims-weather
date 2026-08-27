@@ -444,6 +444,33 @@ _b = _sp2.run([_sys.executable, "-c", _code], capture_output=True, text=True,
               env={**os.environ, "PYTHONHASHSEED": "999"}).stdout.strip()
 check("wind/snow id seed is deterministic across hash seeds", _a == _b and len(_a) == 8, _a)
 
+print("\n=== 18. ARCHIVE FLOOR + IEM FALLBACK (verified live 2026-08-27) ===")
+# The IEM fallback matched ZERO files on older dates: IEM renamed the prefix
+# from MRMS_Max_1440min_ to MESH_Max_1440min_ and the pattern only took one.
+_modern = '<a href="MESH_Max_1440min_00.50_20230711-000000.grib2.gz">x</a>'
+_older  = '<a href="MRMS_Max_1440min_00.50_20200620-122239.grib2.gz">x</a>'
+u1 = hc.parse_iem_listing(_modern, "https://x/")
+u2 = hc.parse_iem_listing(_older, "https://x/")
+check("IEM listing: modern MESH_ prefix matches", len(u1) == 1, str(u1))
+check("IEM listing: older MRMS_ prefix now matches too", len(u2) == 1, str(u2))
+check("both parse to a usable timestamp",
+      hc._parse_ts_from_key(u1[0]) is not None and hc._parse_ts_from_key(u2[0]) is not None)
+check("de-dup still holds", len(hc.parse_iem_listing(_modern + _modern, "https://x/")) == 1)
+
+# The floor was 2014-07-01, which we cannot serve: 2018/2019 hold no MESH on
+# IEM at all. A pre-archive date must now be refused up front, clearly.
+check("archive floor is the AWS start date",
+      hc.IEM_ARCHIVE_START == hc.ARCHIVE_START, str(hc.IEM_ARCHIVE_START))
+try:
+    hc.validate_date_of_loss(dt.date(2018, 6, 20))
+    check("2018 date refused up front", False, "no error raised")
+except ValueError as e:
+    check("2018 date refused up front", True)
+    check("refusal explains the data does not exist", "does not exist" in str(e), str(e)[:90])
+    check("refusal names the real start date", "2020" in str(e))
+hc.validate_date_of_loss(dt.date(2023, 7, 11))   # must NOT raise
+check("in-range date still accepted", True)
+
 print(f"\n{'='*60}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("  FAILED: " + ", ".join(FAIL))
