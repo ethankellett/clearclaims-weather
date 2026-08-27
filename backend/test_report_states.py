@@ -73,8 +73,40 @@ hc.fetch_storm_reports = lambda *a, **k: []          # no network in the sandbox
 DOL = dt.date(2024, 6, 3)
 
 
+def ctx_sample(n_events=12, warned=True, gust=71.0, prior_ok=True):
+    """A realistic PR3 context block for offline rendering."""
+    import datetime as _d
+    evs = [{"date": f"2022-{(i % 12) + 1:02d}-14", "size_in": round(2.5 - i * 0.12, 2),
+            "dist_mi": 0.6 + i * 0.7, "dir": ["N", "NE", "E", "SE"][i % 4],
+            "city": f"Test Locality {i}", "county": "PENNINGTON",
+            "source": "Public", "lat": CY, "lon": CX} for i in range(n_events)]
+    return {
+        "prior_hail": {
+            "ok": prior_ok, "events": evs if prior_ok else [],
+            "window": {"start": _d.date(2022, 6, 3), "end": _d.date(2024, 6, 3),
+                       "months": 24},
+            "summary": ({"inner_mi": 5.0, "outer_mi": 10.0, "min_size_in": 0.75,
+                         "largest_in": 2.5, "largest_date": "2022-01-14",
+                         "largest_dist_mi": 0.6, "count_inner": 6,
+                         "count_outer": n_events, "days_since_severe": 141,
+                         "n_raw": n_events + 4, "n_below_cutoff": 4, "months": 24}
+                        if prior_ok else {}),
+        },
+        "warnings": {"ok": True, "warned": warned,
+                     "warnings": ([{"name": "Severe Thunderstorm Warning",
+                                    "issued": dt.datetime(2024, 6, 3, 22, 58,
+                                                          tzinfo=dt.timezone.utc),
+                                    "wfo": "UNR", "ugc": "SDC103"}] * 4) if warned else [],
+                     "watches": []},
+        "wind": {"ok": True, "peak_mph": gust, "station": "KRAP",
+                 "dist_mi": 3.4, "n_stations": 3} if gust else
+                {"ok": True, "peak_mph": None, "station": None, "dist_mi": None,
+                 "n_stations": 3},
+    }
+
+
 def run(tag, field, address="1234 Mount Rushmore Rd, Rapid City, SD 57701", thr=0.75,
-        rqi=0.92):
+        rqi=0.92, context=None):
     """rqi: float 0..1, or None to simulate RQI being unavailable."""
     g = make_grib(field, os.path.join(TMP, f"{tag}.grib2"))
     out = os.path.join(TMP, tag); os.makedirs(out, exist_ok=True)
@@ -82,7 +114,8 @@ def run(tag, field, address="1234 Mount Rushmore Rd, Rapid City, SD 57701", thr=
                                  date_of_loss=DOL, threshold_in=thr,
                                  out_dir=out, _grib_paths=[g],
                                  _rqi={"value": rqi, "n_files": 2 if rqi is not None else 0,
-                                       "source": "test"})
+                                       "source": "test"},
+                                 _context=context if context is not None else {})
     html = open(os.path.join(out, "report.html"), "w")
     html.write(r["_html"]) if "_html" in r else None
     html.close()
@@ -261,6 +294,60 @@ check("manual coords flagged as manual", loc["precision"] == "manual", loc["prec
 r = run("geo", blob(1.40))
 t = pdf_text(r["pdf_path"])
 check("PDF prints the address-match class", "manual coordinates" in t.lower())
+
+print("\n=== 14. STORM CONTEXT SUPPLEMENT (PR 3) ===")
+r = run("context", blob(1.40), context=ctx_sample())
+t = pdf_text(r["pdf_path"])
+import subprocess as _sp
+pg = _sp.run(["pdfinfo", r["pdf_path"]], capture_output=True, text=True).stdout
+check("report is exactly 2 pages", "Pages:           2" in pg,
+      [l for l in pg.splitlines() if l.startswith("Pages")])
+check("page 1 footer says 1 of 2", "Page 1 of 2" in t)
+check("page 2 footer says 2 of 2", "Page 2 of 2" in t)
+check("supplement titled Storm History", "Storm History" in t)
+check("prior-hail window in the heading",
+      "jun 2022" in t.lower() and "jun 2024" in t.lower())
+check("NWS warning card present", "severe warning" in t.lower())
+check("warned pill shown", "warned" in t.lower())
+check("measured gust shown", "71 mph" in t)
+check("gust labelled a measurement not an estimate", "instrument" in t.lower())
+check("largest prior report stat", "2.50" in t)
+check("days-since stat", "141" in t)
+check("event table capped at 8 rows + overflow line",
+      "further report(s) in this window are not listed" in t.lower())
+# the overflow line must sit with the table, not after the disclaimer
+_ti = t.lower().index("further report(s) in this window")
+_di = t.lower().index("not evidence of damage to this roof")
+check("overflow line stays above the disclaimer", _ti < _di, f"{_ti} vs {_di}")
+check("history disclaimed as not damage evidence",
+      "not evidence of damage to this roof" in t.lower())
+check("rural undersampling stated", "nobody logs hail where nobody lives" in t.lower())
+check("below-cutoff reports disclosed", "display cutoff" in t.lower())
+
+print("\n=== 14b. CONTEXT DEGRADES HONESTLY ===")
+r = run("ctx_none", blob(1.40), context=ctx_sample(n_events=0, warned=False, gust=None))
+t = pdf_text(r["pdf_path"])
+check("no-warning state stated", "no severe thunderstorm or tornado warning" in t.lower())
+check("no-gust state stated", "no measurement" in t.lower())
+check("downburst caveat on a null gust", "miss every station" in t.lower())
+check("empty history stated explicitly", "no official hail report" in t.lower())
+
+r = run("ctx_fail", blob(1.40),
+        context={"prior_hail": {"ok": False, "error": "boom"},
+                 "warnings": {"ok": False, "error": "boom"},
+                 "wind": {"ok": False, "error": "boom"}})
+t = pdf_text(r["pdf_path"])
+check("failed lookup != clean history",
+      "not the same as a clean history" in t.lower())
+check("failed warning lookup says unavailable", "could not be retrieved" in t.lower())
+
+print("\n=== 14c. NO CONTEXT -> STILL A CLEAN ONE-PAGER ===")
+r = run("ctx_off", blob(1.40), context={})
+pg = _sp.run(["pdfinfo", r["pdf_path"]], capture_output=True, text=True).stdout
+t = pdf_text(r["pdf_path"])
+check("falls back to a single page", "Pages:           1" in pg,
+      [l for l in pg.splitlines() if l.startswith("Pages")])
+check("footer says 1 of 1", "Page 1 of 1" in t)
 
 print(f"\n{'='*60}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

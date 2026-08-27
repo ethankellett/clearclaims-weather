@@ -15,6 +15,7 @@ import tempfile
 import datetime as dt
 
 import hail_core as hc
+import storm_context as sctx
 
 #  Bumped whenever the numbers on the report change meaning. Printed in the PDF
 #  footer so any archived report can be traced to the logic that produced it.
@@ -80,6 +81,8 @@ def generate_report(
     out_dir: str | None = None,
     _grib_paths: list | None = None,   # test seam: skip S3 if provided
     _rqi: dict | None = None,          # test seam: inject an RQI reading
+    _context: dict | None = None,      # test seam: inject the PR3 context block
+    with_context: bool = True,         # set False to skip the supplement page
 ) -> dict:
     """Run geocode -> S3 fetch -> parse -> sample -> map -> PDF.
 
@@ -150,6 +153,20 @@ def generate_report(
                                       quality_grade=coverage["quality_grade"])
     corrob_line = hc.corroboration_line(reports, 12.0, coverage["state"])
 
+    # 4c. Storm context for the supplement page (PR 3). All three lookups are
+    # best-effort and individually guarded: a slow or broken endpoint costs that
+    # one card, never the report.
+    if _context is not None:
+        context = _context
+    elif with_context:
+        try:
+            context = sctx.gather(loc["lat"], loc["lon"], date_of_loss,
+                                  utc_start, utc_end)
+        except Exception:
+            context = {}
+    else:
+        context = {}
+
     # 5. footprint map
     map_path = os.path.join(out_dir, "hail_footprint.png")
     hc.make_footprint_map(lats, lons, mesh_mm, loc["lat"], loc["lon"], 1.0, map_path, brand=hc.BRAND)
@@ -193,6 +210,7 @@ def generate_report(
         "confidenceColor": confidence["color"],
         "confidenceNote": confidence["note"],
         "corroborationLine": corrob_line,
+        "context": context,
     }
     html = hc.build_report_html(data, font_dir=font_dir)
     pdf_path = os.path.join(out_dir, f"Clear_Claims_Hail_Report_{report_id}.pdf")
@@ -214,6 +232,7 @@ def generate_report(
         "coverage": coverage,
         "classification": classification,
         "rqi": rqi_grade,
+        "context": context,
         "data_source": source,
         "confidence": confidence,
         "reports": reports,

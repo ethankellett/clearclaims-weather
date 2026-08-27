@@ -1428,6 +1428,24 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .foot {{ background: #06101f; padding: 13px 40px; display: flex; align-items: center; justify-content: space-between; position: absolute; left: 0; right: 0; bottom: 0; }}
   .foot span {{ font-size: 10px; color: #8fa3b8; letter-spacing: .03em; }}
   .foot .conf-tag {{ color: #4a9af5; font-weight: 700; letter-spacing: .18em; }}
+
+  /* ---- page 2: storm history & context ---- */
+  .ctx {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 9px; }}
+  .ctx .card {{ border: 1px solid #dde6f0; border-radius: 9px; padding: 11px 16px; }}
+  .ctx .card .lbl {{ font-size: 9px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #5a6b7e; }}
+  .ctx .card .big {{ font-family: 'DM Serif Display', serif; font-size: 21px; color: #06101f; margin-top: 5px; line-height: 1.1; }}
+  .ctx .card .sub {{ font-size: 11px; color: #4a5d76; line-height: 1.45; margin-top: 5px; }}
+  .pill {{ display: inline-block; color: #fff; font-size: 10px; font-weight: 700; letter-spacing: .08em;
+    text-transform: uppercase; padding: 4px 10px; border-radius: 6px; }}
+
+  .stats {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 9px; }}
+  .stats .s {{ background: #f4f8fc; border-radius: 8px; padding: 9px 12px; }}
+  .stats .s .k {{ font-size: 8.5px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: #5a6b7e; line-height: 1.3; }}
+  .stats .s .v {{ font-family: 'DM Serif Display', serif; font-size: 19px; color: #06101f; margin-top: 4px; line-height: 1; }}
+  .stats .s .u {{ font-size: 10px; color: #8a99ab; margin-top: 3px; }}
+
+  .note {{ font-size: 9.5px; color: #8a99ab; line-height: 1.45; margin-top: 8px; }}
+  .note b {{ color: #5a6b7e; }}
 </style>
 </head>
 <body>
@@ -1518,10 +1536,11 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
     <div class="foot">
       <span>Report {report_id} &middot; {version_line}</span>
       <span class="conf-tag">CONFIDENTIAL</span>
-      <span>Page 1 of 1 &middot; Generated {generated_utc}</span>
+      <span>{page_label} &middot; Generated {generated_utc}</span>
     </div>
 
   </div>
+{page2}
 </body>
 </html>"""
 
@@ -1560,6 +1579,185 @@ def soft_wrap_html(text, limit=58):
     if cur:
         lines.append(cur)
     return "<br>".join(lines)
+
+
+
+#  Cap on printed history rows; the rest are summarised as "+N more" so the
+#  supplement can never run to a third page.
+MAX_PRINTED_EVENTS = 8
+
+
+def build_context_page(data: dict) -> str:
+    """Build the optional page 2: same-day context + 24-month hail history.
+
+    Returns "" when no context was gathered, so a report can still be a clean
+    single page if the lookups are switched off or all fail.
+    """
+    ctx = data.get("context") or {}
+    if not ctx:
+        return ""
+
+    prior = ctx.get("prior_hail") or {}
+    warn = ctx.get("warnings") or {}
+    wind = ctx.get("wind") or {}
+    summ = prior.get("summary") or {}
+
+    # ---- same-day: NWS warnings -----------------------------------------
+    if not warn.get("ok"):
+        w_pill = '<span class="pill" style="background:#5a6b7e;">Unavailable</span>'
+        w_big = "Not retrieved"
+        w_sub = "The NWS warning record could not be retrieved for this date."
+    elif warn.get("warned"):
+        names = []
+        for x in warn["warnings"][:3]:
+            names.append(f'{x["name"]} &middot; {x["issued"]:%H:%M} UTC')
+        extra = (f' &nbsp;+{len(warn["warnings"]) - 3} more'
+                 if len(warn["warnings"]) > 3 else "")
+        w_pill = '<span class="pill" style="background:#d94f3d;">Warned</span>'
+        w_big = f'{len(warn["warnings"])} severe warning(s)'
+        w_sub = "; ".join(names) + extra + (
+            f' &mdash; issued by NWS {warn["warnings"][0]["wfo"]}.')
+    else:
+        n_watch = len(warn.get("watches") or [])
+        w_pill = '<span class="pill" style="background:#28a678;">Not warned</span>'
+        w_big = "No severe warning"
+        w_sub = ("No severe thunderstorm or tornado warning covered this property "
+                 "on the date of loss."
+                 + (f" A watch was in effect ({n_watch})." if n_watch else ""))
+
+    # ---- same-day: measured wind ----------------------------------------
+    if not wind.get("ok") or wind.get("peak_mph") is None:
+        wind_big = "No measurement"
+        wind_sub = ("No nearby ASOS/AWOS station reported a gust for this date. "
+                    "Downbursts are small and routinely miss every station in a county.")
+    else:
+        st = wind.get("station") or "nearest station"
+        dm = wind.get("dist_mi")
+        wind_big = f'{wind["peak_mph"]:.0f} mph'
+        wind_sub = (f'Peak measured gust at {st}'
+                    + (f', {dm:.1f} mi away' if dm is not None else "")
+                    + ". This is an instrument reading, not a radar estimate \u2014 but a "
+                      "downburst can miss the station entirely.")
+
+    # ---- prior hail summary stats ---------------------------------------
+    inner = summ.get("inner_mi", 5)
+    outer = summ.get("outer_mi", 10)
+    if not prior.get("ok"):
+        stats_html = ('<div class="note">The prior-hail record could not be retrieved '
+                      'for this property. This section is unavailable, which is not the '
+                      'same as a clean history.</div>')
+        rows_html = ""
+        cap = ""
+    else:
+        largest = summ.get("largest_in")
+        ds = summ.get("days_since_severe")
+        stats = [
+            ("Largest report<br>within %g mi" % inner,
+             f'{largest:.2f}\u2033' if largest else "None",
+             (summ.get("largest_date") or "in window") if largest else f"in {summ.get('months', 24)} months"),
+            ("Reports &ge; %.2f\u2033<br>within %g mi" % (summ.get("min_size_in", 0.75), inner),
+             str(summ.get("count_inner", 0)), "events"),
+            ("Reports &ge; %.2f\u2033<br>within %g mi" % (summ.get("min_size_in", 0.75), outer),
+             str(summ.get("count_outer", 0)), "events"),
+            ("Since last<br>&ge;1.00\u2033 within %g mi" % inner,
+             (str(ds) if ds is not None else "\u2014"),
+             ("days" if ds is not None else "none in window")),
+        ]
+        stats_html = '<div class="stats">' + "".join(
+            f'<div class="s"><div class="k">{k}</div><div class="v">{v}</div>'
+            f'<div class="u">{u}</div></div>' for k, v, u in stats) + '</div>'
+
+        evs = prior.get("events") or []
+        shown = evs[:MAX_PRINTED_EVENTS]
+        if shown:
+            body = "".join(
+                '<tr><td>{d}</td><td class="num">{s:.2f}</td><td class="num">{km:.1f}</td>'
+                '<td>{dir}</td><td>{c}</td></tr>'.format(
+                    d=e["date"], s=e["size_in"], km=e["dist_mi"], dir=e["dir"],
+                    c=clip_text(e.get("city") or e.get("county") or "", 26))
+                for e in shown)
+            # Keep the overflow line OUTSIDE the table: as a colspan row inside
+            # <tbody> WeasyPrint floated it past the caption instead of keeping
+            # it with its rows.
+            more = (f'<div class="note" style="margin-top:5px;">'
+                    f'+{len(evs) - len(shown)} further report(s) in this window are '
+                    f'not listed.</div>'
+                    if len(evs) > len(shown) else "")
+            rows_html = (
+                '<table><thead><tr><th>Date</th><th class="num">Size (in)</th>'
+                '<th class="num">Dist (mi)</th><th>Dir</th><th>Nearest place</th>'
+                '</tr></thead><tbody>' + body + '</tbody></table>' + more)
+        else:
+            rows_html = ('<div class="note">No official hail report of '
+                         f'{summ.get("min_size_in", 0.75):.2f}\u2033 or greater was logged '
+                         f'within {outer:g} miles in this window.</div>')
+
+        below = summ.get("n_below_cutoff", 0)
+        cap = ('<div class="note"><b>This is history, not evidence of damage to this '
+               'roof.</b> Prior hail nearby does not establish that this property was '
+               'struck, and does not establish that any damage predates the loss. '
+               'Reports are what a person observed and called in: nobody logs hail where '
+               'nobody lives, so a quiet record in open country is not proof that nothing '
+               'fell. Source: NWS Local Storm Reports via Iowa Environmental Mesonet'
+               + (f'; {below} further report(s) below the '
+                  f'{summ.get("min_size_in", 0.75):.2f}\u2033 display cutoff are not shown'
+                  if below else "") + '.</div>')
+
+    win = prior.get("window") or {}
+    win_txt = (f'{win["start"]:%b %Y} \u2013 {win["end"]:%b %Y}'
+               if win.get("start") else "previous 24 months")
+
+    return f'''
+    <div class="page">
+      <div class="hdr">
+        <div class="brand">
+          {_LOGO_SVG}
+          <div>
+            <div class="wm">Clear <span class="b">Claims</span> <span class="co">Co.</span></div>
+            <div class="tag">Fairness in every claim</div>
+          </div>
+        </div>
+        <div class="hdr-right">
+          <div class="site">{data.get("contactUrl", "clearclaimsco.co")}</div>
+          <div class="loc">Report {data["reportId"]}</div>
+        </div>
+      </div>
+
+      <div class="titleband">
+        <h1>Storm History &amp; Context</h1>
+        <div class="kick">Supplement</div>
+      </div>
+
+      <div class="body">
+        <div class="seclbl">Date of Loss &mdash; Independent Context</div>
+        <div class="ctx">
+          <div class="card">
+            <div class="lbl">NWS Warnings at This Property</div>
+            <div class="big">{w_big}</div>
+            <div style="margin-top:7px;">{w_pill}</div>
+            <div class="sub">{w_sub}</div>
+          </div>
+          <div class="card">
+            <div class="lbl">Peak Measured Wind Gust</div>
+            <div class="big">{wind_big}</div>
+            <div class="sub">{wind_sub}</div>
+          </div>
+        </div>
+
+        <div style="margin-top:14px;" class="seclbl">
+          Prior Hail Near This Property &mdash; {win_txt}
+        </div>
+        {stats_html}
+        {rows_html}
+        {cap}
+      </div>
+
+      <div class="foot">
+        <span>Report {data["reportId"]} &middot; {data.get("versionLine", "")}</span>
+        <span class="conf-tag">CONFIDENTIAL</span>
+        <span>Page 2 of 2 &middot; Generated {data.get("generatedUtc", "")}</span>
+      </div>
+    </div>'''
 
 
 def build_report_html(data: dict, font_dir: str | None = None) -> str:
@@ -1661,7 +1859,10 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
         "independent provider and is <strong style=\"color:#5a6b7e;\">not affiliated with "
         "Cotality or CoreLogic</strong>.")
 
+    page2 = build_context_page(data)
     return _HAIL_REPORT_TEMPLATE.format(
+        page2=page2,
+        page_label=("Page 1 of 2" if page2 else "Page 1 of 1"),
         font_face=font_face,
         logo=_LOGO_SVG,
         contact_url=data.get("contactUrl", "clearclaimsco.co"),
