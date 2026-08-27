@@ -73,12 +73,16 @@ hc.fetch_storm_reports = lambda *a, **k: []          # no network in the sandbox
 DOL = dt.date(2024, 6, 3)
 
 
-def run(tag, field, address="1234 Mount Rushmore Rd, Rapid City, SD 57701", thr=0.75):
+def run(tag, field, address="1234 Mount Rushmore Rd, Rapid City, SD 57701", thr=0.75,
+        rqi=0.92):
+    """rqi: float 0..1, or None to simulate RQI being unavailable."""
     g = make_grib(field, os.path.join(TMP, f"{tag}.grib2"))
     out = os.path.join(TMP, tag); os.makedirs(out, exist_ok=True)
     r = pipeline.generate_report(address=address, manual_lat=CY, manual_lon=CX,
                                  date_of_loss=DOL, threshold_in=thr,
-                                 out_dir=out, _grib_paths=[g])
+                                 out_dir=out, _grib_paths=[g],
+                                 _rqi={"value": rqi, "n_files": 2 if rqi is not None else 0,
+                                       "source": "test"})
     html = open(os.path.join(out, "report.html"), "w")
     html.write(r["_html"]) if "_html" in r else None
     html.close()
@@ -96,20 +100,22 @@ print("\n=== 1. ALL-SENTINEL GRID = QUIET DAY, NOT A COVERAGE FAILURE ===")
 # quiet day almost every cell is a missing sentinel. That must read as 0.00 in,
 # NOT as "coverage unavailable" - but the report must also stop claiming it has
 # verified coverage, because MESH alone cannot tell a gap from a hail-free cell.
-r = run("nocov", no_coverage())
+r = run("nocov", no_coverage(), rqi=0.92)
 t = pdf_text(r["pdf_path"])
-check("coverage state is 'unknown' (honest)", r["coverage"]["state"] == "unknown",
+check("sparse grid + good RQI -> coverage ok", r["coverage"]["state"] == "ok",
       r["coverage"]["state"])
 check("reads as 0.00 in, not a failure", r["classification"]["band"] == "none",
       r["classification"]["band"])
 check("PDF prints 0.00", "0.00" in t)
-check("PDF discloses coverage is unverified", "not independently verified" in t.lower())
+check("PDF prints the radar quality grade", "excellent" in t.lower())
 check("negative still called weak", "weaker evidence" in t.lower())
-check("confidence capped at Moderate", r["confidence"]["level"] == "Moderate",
+check("clean view earns a High negative", r["confidence"]["level"] == "High",
       str(r["confidence"]["level"]))
 
 print("\n=== 1b. GENUINE no-coverage state still renders correctly ===")
 # Reached when a future coverage source (MRMS RQI, PR 2) reports a real gap.
+cov = hc.assess_coverage(hc.grade_rqi(0.0))
+check("RQI 0.0 -> coverage state 'none'", cov["state"] == "none", cov["state"])
 cls = hc.classify_hail(None, None, 0.75, coverage_state="none")
 check("band = no_coverage", cls["band"] == "no_coverage")
 check("detected is None, not False", cls["detected"] is None)
@@ -121,10 +127,10 @@ check("no confidence level", conf["level"] is None)
 print("\n=== 2. ZERO HAIL, GOOD COVERAGE ===")
 r = run("zero", blob(0))
 t = pdf_text(r["pdf_path"])
-check("coverage state honest (unknown until RQI)", r["coverage"]["state"] == "unknown", r["coverage"]["state"])
+check("coverage ok from RQI", r["coverage"]["state"] == "ok", r["coverage"]["state"])
 check("badge = None Detected", r["classification"]["badge"] == "None Detected")
 check("calls the negative weak", "weaker evidence" in t.lower())
-check("confidence capped at Moderate", r["confidence"]["level"] == "Moderate",
+check("clean view earns a High negative", r["confidence"]["level"] == "High",
       str(r["confidence"]["level"]))
 
 print("\n=== 3. SUB-SEVERE 0.40in (must still print) ===")
@@ -195,6 +201,66 @@ r = run("longaddr", blob(1.40), address=long_addr)
 n = subprocess.run(["pdfinfo", r["pdf_path"]], capture_output=True, text=True).stdout
 pages = [l for l in n.splitlines() if l.startswith("Pages:")]
 check("still one page", "1" in (pages[0] if pages else ""), pages[0] if pages else "?")
+
+print("\n=== 11. RQI GRADES AND THEIR EFFECT (PR 2) ===")
+for val, want in [(0.95, "Excellent"), (0.62, "Good"), (0.31, "Fair"),
+                  (0.08, "Poor"), (0.0, "No coverage"), (None, "Not assessed")]:
+    g = hc.grade_rqi(val)
+    check(f"RQI {val} -> {want}", g["grade"] == want, g["grade"])
+
+r = run("poorrqi", blob(0), rqi=0.08)
+check("Poor RQI drags a negative down to Low", r["confidence"]["level"] == "Low",
+      str(r["confidence"]["level"]))
+check("Poor RQI -> coverage 'partial'", r["coverage"]["state"] == "partial",
+      r["coverage"]["state"])
+t = pdf_text(r["pdf_path"])
+check("PDF says degraded coverage", "degraded" in t.lower())
+
+r = run("norqi", blob(0), rqi=None)
+check("RQI unavailable -> coverage 'unknown'", r["coverage"]["state"] == "unknown",
+      r["coverage"]["state"])
+check("RQI unavailable caps a negative at Moderate",
+      r["confidence"]["level"] == "Moderate", str(r["confidence"]["level"]))
+t = pdf_text(r["pdf_path"])
+check("PDF says quality not assessed", "not assessed" in t.lower())
+
+r = run("hail_poorrqi", blob(1.40), rqi=0.08)
+check("Poor RQI drags a POSITIVE down too", r["confidence"]["level"] == "Low",
+      str(r["confidence"]["level"]))
+
+print("\n=== 12. SPC 12Z-12Z CLOCK (defect D2) ===")
+import datetime as _dt
+cd = _dt.date(2024, 6, 3)
+t0 = hc.spc_row_time_utc("2130", cd)
+t1 = hc.spc_row_time_utc("0215", cd)
+check("2130Z stays on the convective day", t0 and t0.date() == cd, str(t0))
+check("0215Z rolls to the NEXT calendar day",
+      t1 and t1.date() == cd + _dt.timedelta(days=1), str(t1))
+check("pre-noon hour is later than evening hour", t1 > t0)
+check("garbage time -> None", hc.spc_row_time_utc("xx", cd) is None)
+
+csv = ("Time,Size,Location,County,State,Lat,Lon,Comments\n"
+       "0215,175,QUITAQUE,BRISCOE,TX,44.081,-103.231,early morning\n"
+       "2130,100,QUITAQUE,BRISCOE,TX,44.082,-103.232,evening\n")
+win_s = _dt.datetime(2024, 6, 4, 0, 0, tzinfo=_dt.timezone.utc)
+win_e = _dt.datetime(2024, 6, 4, 12, 0, tzinfo=_dt.timezone.utc)
+got = hc.parse_spc_hail_csv(csv, 44.081, -103.231, 20.0,
+                            convective_day=cd, utc_start=win_s, utc_end=win_e)
+check("window filter keeps only the early-morning report",
+      len(got) == 1 and abs(got[0]["size_in"] - 1.75) < 1e-6, str(got))
+
+print("\n=== 13. GEOCODE PRECISION (T0-9) ===")
+check("nominatim house -> rooftop",
+      hc.classify_nominatim_precision({"class": "place", "type": "house"}) == "rooftop")
+check("nominatim highway -> street",
+      hc.classify_nominatim_precision({"class": "highway", "type": "residential"}) == "street")
+check("nominatim town -> area",
+      hc.classify_nominatim_precision({"class": "place", "type": "town"}) == "area")
+loc = hc.resolve_location(None, 44.08, -103.23)
+check("manual coords flagged as manual", loc["precision"] == "manual", loc["precision"])
+r = run("geo", blob(1.40))
+t = pdf_text(r["pdf_path"])
+check("PDF prints the address-match class", "manual coordinates" in t.lower())
 
 print(f"\n{'='*60}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

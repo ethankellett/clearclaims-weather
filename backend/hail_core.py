@@ -114,6 +114,41 @@ def local_day_utc_window(date_of_loss: dt.date, lat: float, lon: float):
 #  2.  GEOCODING  (address -> latitude / longitude)
 # =============================================================================
 
+#  How exact is the pin? A rooftop match and a town centroid are both "a
+#  lat/lon", but only one of them justifies quoting a half-mile peak as though
+#  it were the property. The report prints this so the reader can judge.
+GEOCODE_PRECISION = {
+    "rooftop": "Matched to a specific address point.",
+    "interpolated": "Interpolated along an address range \u2014 typically accurate to "
+                    "within a few hundred feet.",
+    "street": "Matched to a street or road centreline, not a building.",
+    "area": "Matched only to a town, ZIP or area centroid \u2014 the pin may be a "
+            "long way from the actual property.",
+    "manual": "Coordinates supplied directly.",
+    "unknown": "Match precision not reported by the geocoder.",
+}
+
+
+def classify_nominatim_precision(top: dict) -> str:
+    """Map a Nominatim result's class/type onto our precision buckets."""
+    cls = (top.get("class") or "").lower()
+    typ = (top.get("type") or "").lower()
+    # Order matters: a highway can carry type "residential", which would
+    # otherwise fall through to the rooftop branch below.
+    if cls == "highway":
+        return "street"
+    if cls == "place" and typ in ("house", "building", "address"):
+        return "rooftop"
+    if cls == "building" or typ in ("house", "address", "yes"):
+        return "rooftop"
+    if cls == "place" and typ in ("city", "town", "village", "hamlet",
+                                  "suburb", "postcode", "county", "state"):
+        return "area"
+    if cls == "boundary":
+        return "area"
+    return "unknown"
+
+
 def geocode_census(address: str, timeout: int = 30):
     """Geocode with the U.S. Census geocoder (authoritative US address ranges).
 
@@ -130,7 +165,12 @@ def geocode_census(address: str, timeout: int = 30):
         return None
     best = matches[0]
     c = best["coordinates"]
-    return float(c["y"]), float(c["x"]), best.get("matchedAddress", address), "U.S. Census"
+    side = ((best.get("tigerLine") or {}).get("side") or "").strip()
+    # The Census "onelineaddress" locator interpolates along TIGER address
+    # ranges; it does not return rooftop points.
+    precision = "interpolated" if side else "unknown"
+    return (float(c["y"]), float(c["x"]), best.get("matchedAddress", address),
+            "U.S. Census", precision)
 
 
 def geocode_nominatim(address: str, timeout: int = 30):
@@ -142,7 +182,7 @@ def geocode_nominatim(address: str, timeout: int = 30):
     """
     import requests
     url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": address, "format": "json", "limit": 1, "addressdetails": 0}
+    params = {"q": address, "format": "json", "limit": 1, "addressdetails": 1}
     headers = {"User-Agent": "ClearClaimsHailReport/1.0 (ops@clearclaimsco.co)"}
     resp = requests.get(url, params=params, headers=headers, timeout=timeout)
     resp.raise_for_status()
@@ -150,7 +190,8 @@ def geocode_nominatim(address: str, timeout: int = 30):
     if not isinstance(data, list) or not data:
         return None
     top = data[0]
-    return float(top["lat"]), float(top["lon"]), top.get("display_name", address), "OpenStreetMap"
+    return (float(top["lat"]), float(top["lon"]), top.get("display_name", address),
+            "OpenStreetMap", classify_nominatim_precision(top))
 
 
 def geocode_address(address: str, timeout: int = 30):
@@ -189,7 +230,9 @@ def resolve_location(address: str | None,
     if manual_lat is not None and manual_lon is not None:
         return {"lat": float(manual_lat), "lon": float(manual_lon),
                 "label": address or f"{manual_lat:.5f}, {manual_lon:.5f}",
-                "source": "manual lat/long override"}
+                "source": "manual lat/long override",
+                "precision": "manual",
+                "precision_note": GEOCODE_PRECISION["manual"]}
 
     if not address or not address.strip():
         raise ValueError("No address was provided and no manual lat/long override was set.")
@@ -204,9 +247,12 @@ def resolve_location(address: str | None,
             f"to enter coordinates by hand (right-click the spot in Google Maps to copy "
             f"them — remember West longitude is negative)."
         )
-    lat, lon, matched, provider = result
+    lat, lon, matched, provider, precision = result
     return {"lat": lat, "lon": lon, "label": matched,
-            "source": f"{provider} geocoder"}
+            "source": f"{provider} geocoder",
+            "precision": precision,
+            "precision_note": GEOCODE_PRECISION.get(precision,
+                                                    GEOCODE_PRECISION["unknown"])}
 
 
 # =============================================================================
@@ -391,40 +437,35 @@ def fetch_mesh_paths(utc_start, utc_end, date_of_loss, tmpdir, max_files=5):
 #  4.  READ THE GRIB2 FILE  (pull out the hail-size grid)
 # =============================================================================
 
-def read_mesh_grib(path: str):
-    """Read one MRMS MESH GRIB2 file into plain numpy arrays.
+def read_grib_field(path: str):
+    """Read one MRMS GRIB2 file into plain numpy arrays (lats_1d, lons_1d, 2-D).
 
-    Returns (lats_1d, lons_1d, mesh_mm_2d) where:
-      * lats_1d  : 1-D latitudes  (north -> south, the MRMS order)
-      * lons_1d  : 1-D longitudes converted to the -180..180 range
-      * mesh_mm_2d: 2-D hail size in MILLIMETRES, shape (len(lats), len(lons))
-
-    MRMS MESH often loads with the data variable named 'unknown' and longitudes
-    in the 0..360 range — both are handled here.
+    Shared by the MESH and RQI readers. Handles the two MRMS quirks: the data
+    variable is often named 'unknown', and longitudes come in the 0..360 range.
+    Sentinel values (MRMS uses large negatives for missing/no-coverage) become
+    NaN. What a NaN MEANS depends on the product and is the caller's business:
+    for MESH it means "no hail diagnosed here"; for RQI it means "no radar
+    quality value here", which really is an absence of coverage.
     """
     import xarray as xr
 
-    # indexpath='' stops cfgrib writing a sidecar .idx file (read-only dirs).
     ds = xr.open_dataset(path, engine="cfgrib", backend_kwargs={"indexpath": ""})
-
-    # Pick the hail-size variable: prefer 'unknown', else the first data var.
     var = "unknown" if "unknown" in ds.data_vars else list(ds.data_vars)[0]
     da = ds[var]
 
     lats = np.asarray(ds["latitude"].values, dtype="float64")
     lons = np.asarray(ds["longitude"].values, dtype="float64")
-    # float32 for the big grid keeps memory low (precise enough for mm values).
-    mesh = np.asarray(da.values, dtype="float32")
-
-    # Convert 0..360 longitudes to -180..180 so they match geocoder output.
+    arr = np.asarray(da.values, dtype="float32")
     lons = np.where(lons > 180.0, lons - 360.0, lons)
-
-    # Some MRMS grids use a large negative/sentinel for "no coverage"; clamp to 0.
-    mesh = np.where(np.isfinite(mesh), mesh, np.nan)
-    mesh = np.where((mesh < 0) | (mesh > 1000), np.nan, mesh)
-
+    arr = np.where(np.isfinite(arr), arr, np.nan)
+    arr = np.where((arr < 0) | (arr > 1000), np.nan, arr)
     ds.close()
-    return lats, lons, mesh
+    return lats, lons, arr
+
+
+def read_mesh_grib(path: str):
+    """MESH grid in MILLIMETRES (lats north->south, lons -180..180)."""
+    return read_grib_field(path)
 
 
 def crop_to_bbox(lats, lons, mesh, lat, lon, pad_deg=0.30):
@@ -533,6 +574,129 @@ def sample_rings(lats, lons, mesh_mm, lat, lon, rings=(0.5, 1, 3, 5)):
     return out
 
 
+# =============================================================================
+#  RADAR QUALITY INDEX (RQI)  — the real answer to "could the radar see here?"
+# =============================================================================
+#  Verified live on 2026-08-27 against s3://noaa-mrms-pds:
+#      CONUS/RadarQualityIndex_00.00/YYYYMMDD/
+#      MRMS_RadarQualityIndex_00.00_YYYYMMDD-HHMMSS.grib2.gz
+#  2-minute cadence, ~650 KB gzipped, history back through at least 2023.
+#
+#  RQI is NOAA's own 0..1 index built from static terrain-blockage maps and
+#  beam height relative to the freezing level. It is the field the MESH grid
+#  cannot provide: MESH is sparse and says nothing where no hail fell, whereas
+#  RQI is defined everywhere the radar network reaches. This is what lets the
+#  report tell a genuine radar gap (Black Hills terrain blockage, say) apart
+#  from a quiet day.
+#
+#  Honest caveat printed on the report: RQI is designed as a QPE (rainfall)
+#  quality index. We use it as a coverage / blockage indicator, which is what
+#  its blockage term measures, not as a hail-specific quality score.
+# =============================================================================
+
+RQI_PRODUCT = "RadarQualityIndex_00.00"
+RQI_S3_PREFIX = f"{S3_BUCKET}/CONUS/{RQI_PRODUCT}"
+
+
+def select_rqi_keys(fs, utc_start, utc_end, max_files=2):
+    """Pick a few RQI files spread across the local day (UTC window).
+
+    We deliberately sample rather than read all 720 daily files. The blockage
+    term of RQI barely moves through a day, so a handful answers the coverage
+    question; taking the MAX across samples asks "at its best, could the radar
+    see this point today?", which is the fair test for a coverage gap.
+    """
+    keys = []
+    for d in sorted({utc_start.date(), utc_end.date()}):
+        folder = f"{RQI_S3_PREFIX}/{d:%Y%m%d}"
+        try:
+            keys.extend([k for k in fs.ls(folder) if k.endswith(".grib2.gz")])
+        except FileNotFoundError:
+            continue
+    stamped = [(k, _parse_ts_from_key(k)) for k in keys]
+    stamped = [(k, t) for k, t in stamped if t is not None and utc_start <= t <= utc_end]
+    if not stamped:
+        return []
+    stamped.sort(key=lambda kt: kt[1])
+    if len(stamped) > max_files:
+        idx = np.linspace(0, len(stamped) - 1, max_files).round().astype(int)
+        stamped = [stamped[i] for i in sorted(set(idx))]
+    return [k for k, _ in stamped]
+
+
+def fetch_rqi_at_point(utc_start, utc_end, lat, lon, tmpdir, max_files=None,
+                       pad_deg=0.30):
+    """Best-effort MAX RQI at/near the property across the local day.
+
+    Returns {'value', 'n_files', 'source'} with value in 0..1, or value=None if
+    RQI could not be obtained (pre-2020 dates served from the IEM mirror, a
+    network hiccup, anything). A None here must degrade to "not assessed" on
+    the report — never to a confident claim in either direction.
+    """
+    if max_files is None:
+        try:
+            max_files = max(1, int(os.environ.get("RQI_MAX_FILES", "2")))
+        except ValueError:
+            max_files = 2
+
+    best = None
+    n = 0
+    try:
+        fs = open_s3()
+        keys = select_rqi_keys(fs, utc_start, utc_end, max_files)
+        for k in keys:
+            try:
+                p = download_and_gunzip(fs, k, tmpdir)
+                la, lo, arr = read_grib_field(p)
+                cla, clo, carr = crop_to_bbox(la, lo, arr, lat, lon, pad_deg)
+                del la, lo, arr
+                LON, LAT = np.meshgrid(clo, cla)
+                dist = haversine_miles(lat, lon, LAT, LON)
+                pi, pj = np.unravel_index(np.nanargmin(dist), dist.shape)
+                v = carr[pi, pj]
+                if np.isfinite(v):
+                    best = float(v) if best is None else max(best, float(v))
+                n += 1
+                del carr, cla, clo
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+                gc.collect()
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    return {"value": best, "n_files": n,
+            "source": (f"NOAA MRMS {RQI_PRODUCT} (AWS Open Data)" if n else None)}
+
+
+#  Grades. RQI runs 0 (useless) to 1 (clean view). The cut points below are
+#  ours, not NOAA's, and are deliberately conservative: we would rather say
+#  "quality fair, treat with care" than imply a clean look the radar never had.
+RQI_GRADES = (
+    (0.80, "Excellent", "Clean radar view of this location."),
+    (0.50, "Good", "Usable radar view of this location."),
+    (0.20, "Fair", "Degraded radar view \u2014 partial beam blockage or long range."),
+    (0.01, "Poor", "Severely degraded radar view \u2014 terrain blockage or extreme range."),
+)
+
+
+def grade_rqi(value):
+    """Turn an RQI value into {grade, note, value}. None -> 'Not assessed'."""
+    if value is None:
+        return {"grade": "Not assessed", "value": None,
+                "note": ("Radar coverage quality could not be retrieved for this date, "
+                         "so it is not stated.")}
+    for cut, grade, note in RQI_GRADES:
+        if value >= cut:
+            return {"grade": grade, "value": value, "note": note}
+    return {"grade": "No coverage", "value": value,
+            "note": ("NOAA's radar quality index is zero at this location on this date "
+                     "\u2014 the radar network could not see this point.")}
+
+
 # -----------------------------------------------------------------------------
 #  RADAR COVERAGE STATE  (defect D1 — "no data" must never look like "no hail")
 # -----------------------------------------------------------------------------
@@ -544,46 +708,49 @@ COVERAGE_OK_FRAC = 0.80      # >= this -> "ok"
 COVERAGE_MIN_FRAC = 0.50     # >= this -> "partial";  below -> "none"
 
 
-def assess_coverage(lats, lons, mesh_mm, lat, lon, radius_miles=COVERAGE_RADIUS_MI):
-    """Classify radar coverage as 'ok' | 'unknown' | 'none'.
+def assess_coverage(rqi_grade: dict | None = None, hail_cells: int = 0,
+                    total_cells: int = 0, radius_miles=COVERAGE_RADIUS_MI):
+    """Decide the radar-coverage state from NOAA's RQI, not from the MESH field.
 
-    Honest limitation: the MESH field alone CANNOT tell a radar gap from a
-    hail-free cell, because MESH is sparse and writes nothing where it found no
-    hail. Counting valid cells here measures "did hail happen nearby", which is
-    a different question — that mistake shipped briefly on 2026-08-27 and made
-    every quiet day read as a coverage failure.
+    Why not from MESH: MESH is sparse and writes nothing where no hail fell, so
+    counting valid MESH cells measures "did hail happen nearby" — a different
+    question entirely. That mistake shipped briefly on 2026-08-27 and made every
+    quiet day read as a coverage failure. RQI is defined everywhere the radar
+    network reaches, so it can actually answer this.
 
-    So this returns:
-      'none'    - the entire cropped grid was unreadable (a real data failure)
-      'unknown' - the normal case: nothing contradicts coverage, but nothing
-                  confirms it either. The report says so rather than implying a
-                  verified negative.
-      'ok'      - reserved for when the MRMS RadarQualityIndex product is wired
-                  in (PR 2) and actually confirms the radar can see this point.
+    States:
+      'none'    - RQI is zero here: the radar network cannot see this point.
+      'partial' - RQI is Poor: severe blockage or extreme range.
+      'ok'      - RQI is Fair or better.
+      'unknown' - RQI unavailable (e.g. a pre-2020 date served from the IEM
+                  mirror). The report says coverage is unverified rather than
+                  guessing.
 
-    `hail_cells` is kept for diagnostics: how many cells within the radius
-    carried a hail signal at all.
+    `hail_cells` / `total_cells` are carried for diagnostics only and must never
+    drive this decision again.
     """
+    g = (rqi_grade or {}).get("grade", "Not assessed")
+    state = {"No coverage": "none", "Poor": "partial", "Fair": "ok",
+             "Good": "ok", "Excellent": "ok"}.get(g, "unknown")
+    return {"state": state, "hail_cells": hail_cells, "total_cells": total_cells,
+            "radius_miles": radius_miles,
+            "quality_grade": g,
+            "quality_value": (rqi_grade or {}).get("value"),
+            "quality_note": (rqi_grade or {}).get("note", ""),
+            "quality_source": (rqi_grade or {}).get("source"),
+            # legacy keys kept so nothing KeyErrors
+            "valid_cells": hail_cells,
+            "valid_frac": (hail_cells / total_cells) if total_cells else 0.0}
+
+
+def count_hail_cells(lats, lons, mesh_mm, lat, lon, radius_miles=COVERAGE_RADIUS_MI):
+    """Diagnostics only: how many cells within the radius carried a hail signal."""
     LON, LAT = np.meshgrid(lons, lats)
     dist = haversine_miles(lat, lon, LAT, LON)
     mask = dist <= radius_miles
     if not mask.any():
-        pi, pj = np.unravel_index(np.nanargmin(dist), dist.shape)
-        mask = np.zeros_like(dist, dtype=bool)
-        mask[pi, pj] = True
-    total = int(mask.sum())
-    hail_cells = int((mask & np.isfinite(mesh_mm)).sum())
-
-    # Deliberately ALWAYS 'unknown' until RQI lands. A quiet day and a radar gap
-    # are indistinguishable in the MESH field, so any grid-derived guess here is
-    # a coin flip dressed as a finding. A genuine unreadable-grid failure raises
-    # upstream in max_mesh_over_files / _fetch_grib_paths and never reaches here.
-    state = "unknown"
-    return {"state": state, "hail_cells": hail_cells, "total_cells": total,
-            "radius_miles": radius_miles, "quality_source": None,
-            # kept so older callers/templates don't KeyError
-            "valid_cells": hail_cells,
-            "valid_frac": (hail_cells / total) if total else 0.0}
+        return 0, 0
+    return int((mask & np.isfinite(mesh_mm)).sum()), int(mask.sum())
 
 
 # -----------------------------------------------------------------------------
@@ -625,8 +792,8 @@ def classify_hail(peak_in, cell_in, threshold_in, coverage_state="ok"):
     thr = f"{threshold_in:.2f}\u2033"
 
     coverage_caveat = (
-        " Radar coverage at this location is not independently verified in this "
-        "version, so a coverage gap cannot be fully ruled out.")
+        " Radar coverage quality could not be retrieved for this date, so a "
+        "coverage gap cannot be fully ruled out.")
 
     if coverage_state == "none" or peak_in is None:
         return {
@@ -646,7 +813,10 @@ def classify_hail(peak_in, cell_in, threshold_in, coverage_state="ok"):
         verdict = "Radar shows no hail signature at this property on this date."
         detail = ("A radar-based negative is weaker evidence than a positive. "
                   "Small or brief hail can fall below what the radar resolves."
-                  + (coverage_caveat if coverage_state != "ok" else ""))
+                  + (coverage_caveat if coverage_state == "unknown" else "")
+                  + (" NOAA's radar quality index shows only partial coverage at "
+                     "this location, which weakens this negative further."
+                     if coverage_state == "partial" else ""))
         likelihood = "No indication"
     elif peak_in < MESH_DISCRIMINATION_FLOOR_IN:
         band, theme = "trace", "caution"
@@ -763,7 +933,26 @@ def parse_iem_lsr_geojson(obj: dict, lat: float, lon: float, radius_miles: float
     return out
 
 
-def parse_spc_hail_csv(text: str, lat: float, lon: float, radius_miles: float):
+def spc_row_time_utc(hhmm: str, convective_day):
+    """Turn an SPC 'Time' cell (HHMM, UTC) into a datetime on the right day.
+
+    SPC convective day D covers 12Z on D through 12Z on D+1, so an hour before
+    12 belongs to the NEXT calendar day. Returns None if unparseable.
+    """
+    try:
+        hhmm = (hhmm or "").strip()
+        if len(hhmm) != 4 or not hhmm.isdigit():
+            return None
+        hh, mm = int(hhmm[:2]), int(hhmm[2:])
+        day = convective_day + (dt.timedelta(days=1) if hh < 12 else dt.timedelta(0))
+        return dt.datetime(day.year, day.month, day.day, hh, mm,
+                           tzinfo=dt.timezone.utc)
+    except Exception:
+        return None
+
+
+def parse_spc_hail_csv(text: str, lat: float, lon: float, radius_miles: float,
+                       convective_day=None, utc_start=None, utc_end=None):
     """Extract hail reports from an SPC daily hail CSV, within radius_miles.
 
     SPC columns: Time, Size (hundredths of an inch), Location, County, State,
@@ -780,13 +969,20 @@ def parse_spc_hail_csv(text: str, lat: float, lon: float, radius_miles: float):
         except (TypeError, ValueError):
             continue
         d = float(haversine_miles(lat, lon, rlat, rlon))
-        if d <= radius_miles:
-            out.append({
-                "source": "SPC", "size_in": size_in,
-                "lat": rlat, "lon": rlon, "dist_mi": d,
-                "dir": compass_bearing(lat, lon, rlat, rlon),
-                "time": row.get("Time", ""), "city": row.get("Location", ""),
-            })
+        if d > radius_miles:
+            continue
+        # Keep only reports that actually fall inside the property's local day.
+        t = spc_row_time_utc(row.get("Time", ""), convective_day) if convective_day else None
+        if t is not None and utc_start is not None and utc_end is not None:
+            if not (utc_start <= t <= utc_end):
+                continue
+        out.append({
+            "source": "SPC", "size_in": size_in,
+            "lat": rlat, "lon": rlon, "dist_mi": d,
+            "dir": compass_bearing(lat, lon, rlat, rlon),
+            "time": (t.strftime("%Y-%m-%dT%H:%MZ") if t else row.get("Time", "")),
+            "city": row.get("Location", ""),
+        })
     return out
 
 
@@ -810,14 +1006,19 @@ def fetch_storm_reports(lat, lon, utc_start, utc_end, date_of_loss, radius_miles
     except Exception:
         pass
 
-    # SPC daily hail CSV (UTC convective day ~ matches our date of loss).
-    try:
-        url = f"https://www.spc.noaa.gov/climo/reports/{date_of_loss:%y%m%d}_rpts_hail.csv"
-        r = requests.get(url, timeout=30)
-        if r.status_code == 200 and "Lat" in r.text[:200]:
-            reports += parse_spc_hail_csv(r.text, lat, lon, radius_miles)
-    except Exception:
-        pass
+    # SPC daily hail CSV. DEFECT D2: an SPC "daily" file runs 12Z -> 12Z, NOT
+    # local midnight to midnight. A 2 a.m. local event on the date of loss lives
+    # in the PREVIOUS day's file. Fetch both days and let the de-dup sort it out.
+    for d in (date_of_loss - dt.timedelta(days=1), date_of_loss):
+        try:
+            url = f"https://www.spc.noaa.gov/climo/reports/{d:%y%m%d}_rpts_hail.csv"
+            r = requests.get(url, timeout=30)
+            if r.status_code == 200 and "Lat" in r.text[:200]:
+                reports += parse_spc_hail_csv(r.text, lat, lon, radius_miles,
+                                              convective_day=d,
+                                              utc_start=utc_start, utc_end=utc_end)
+        except Exception:
+            continue
 
     # De-duplicate near-identical reports (same rounded spot + size).
     seen, deduped = set(), []
@@ -829,30 +1030,43 @@ def fetch_storm_reports(lat, lon, utc_start, utc_end, date_of_loss, radius_miles
     return deduped
 
 
+#  Confidence matrix (defect D7, completed in PR 2 now that radar quality is a
+#  real measured value rather than a guess).
+#
+#  Two asymmetries are deliberate and both are defensible in a deposition:
+#    * A radar POSITIVE corroborated by ground reports is the strongest result
+#      the system can produce.
+#    * A radar NEGATIVE is inherently weaker than a positive, because brief or
+#      small hail can fall below what the radar resolves. A negative can only
+#      reach High when the radar demonstrably had a clean view (RQI Excellent).
+_QUALITY_RANK = {"Excellent": 4, "Good": 3, "Fair": 2, "Poor": 1,
+                 "No coverage": 0, "Not assessed": None}
+
+
 def assess_confidence(point_in, ring_max_in, reports, threshold_in, source=None,
-                      coverage_state="ok"):
-    """Combine radar + ground reports into a stated confidence level.
+                      coverage_state="unknown", quality_grade="Not assessed"):
+    """Combine radar reading, radar QUALITY and ground reports into a level.
 
-    Returns {level, color, note, n_reports} — or level=None when radar coverage
-    was insufficient, in which case the report shows NO confidence chip at all
-    (defect D1 + D7: we must never print a confident verdict over missing data).
-
-    Note: the full confidence matrix additionally weights radar range/beam
-    height. That arrives with the radar-quality score; until then a clean
-    negative is capped at Moderate rather than High.
+    Returns {level, color, note, n_reports}. level is None when coverage is
+    missing entirely — in that case the report shows no confidence chip at all,
+    because a confident verdict over absent data is exactly the failure this
+    whole rebuild exists to remove.
     """
     if coverage_state == "none" or point_in is None:
         return {"level": None, "color": None, "n_reports": len(reports),
-                "note": ("Radar coverage was insufficient at this location on this "
-                         "date, so no confidence level is stated. This is an absence "
-                         "of data, not evidence that hail did not occur.")}
+                "note": ("NOAA's radar quality index shows no usable radar coverage "
+                         "at this location on this date, so no confidence level is "
+                         "stated. This is an absence of data, not evidence that hail "
+                         "did not occur.")}
 
+    rank = _QUALITY_RANK.get(quality_grade)
     radar_max = max(point_in, ring_max_in if ring_max_in is not None else point_in)
     detected = point_in >= threshold_in
     n = len(reports)
     biggest = max([r["size_in"] for r in reports if r["size_in"]], default=0.0)
-    partial = (coverage_state == "partial")
-    unverified = (coverage_state == "unknown")
+    qual_txt = (f" Radar quality at this location was {quality_grade.lower()}."
+                if rank is not None else
+                " Radar coverage quality could not be retrieved for this date.")
 
     if detected:
         if n >= 1:
@@ -873,22 +1087,47 @@ def assess_confidence(point_in, ring_max_in, reports, threshold_in, source=None,
         if n >= 1:
             level = "Low"
             note = (f"Radar did not meet the threshold at the property, yet {n} hail "
-                    f"report(s) were logged nearby \u2014 verify exact timing and location.")
+                    f"report(s) were logged nearby \u2014 verify exact timing and "
+                    f"location.")
+        elif rank is not None and rank >= 4:
+            # Only a demonstrably clean radar view earns a confident negative.
+            level = "High"
+            note = ("Radar shows no significant hail at the property, no ground "
+                    "reports were logged nearby, and NOAA's radar quality index "
+                    "confirms a clean view of this location.")
         else:
-            # A radar-based NEGATIVE is inherently weaker than a positive: brief or
-            # small hail can fall below what the radar resolves, and ground reports
-            # are sparse where nobody lives. Capped at Moderate (was: High).
             level = "Moderate"
             note = ("Radar shows no significant hail at the property and no ground "
                     "reports were logged nearby. A radar-based negative is weaker "
-                    "evidence than a positive \u2014 brief or small hail can fall below "
-                    "what the radar resolves, and radar coverage at this point is not "
-                    "independently verified in this version.")
+                    "evidence than a positive \u2014 brief or small hail can fall "
+                    "below what the radar resolves.")
 
-    if partial:
-        level = {"High": "Moderate", "Moderate": "Low", "Low": "Low"}[level]
-        note += (" Radar coverage at this location was only partial, so confidence "
-                 "has been reduced accordingly.")
+    # Quality adjustments apply to conclusions that REST on the radar reading.
+    # A positive corroborated by independent ground observers does not: those
+    # reports are evidence in their own right, and the radar's view of the
+    # property is no longer what the finding depends on. Exempting that case
+    # keeps the strongest result the system can produce from being watered down
+    # by a missing quality value.
+    corroborated_positive = detected and n >= 1
+    if corroborated_positive:
+        if rank is not None and rank <= 1:
+            level = "Moderate"
+            note += (" NOAA's radar quality index shows severely degraded radar "
+                     "coverage here, so this rests mainly on the ground reports.")
+        color = {"High": "#28a678", "Moderate": "#e6a117", "Low": "#d94f3d"}[level]
+        return {"level": level, "color": color, "note": note, "n_reports": n}
+
+    # Degraded radar quality pulls confidence down whatever the reading says.
+    if rank is not None and rank <= 1:
+        level = {"High": "Low", "Moderate": "Low", "Low": "Low"}[level]
+        note += (" NOAA's radar quality index shows severely degraded coverage here, "
+                 "so confidence has been reduced.")
+    elif rank == 2:
+        level = {"High": "Moderate", "Moderate": "Moderate", "Low": "Low"}[level]
+        note += " Radar quality at this location was only fair."
+    elif rank is None:
+        level = {"High": "Moderate", "Moderate": "Moderate", "Low": "Low"}[level]
+        note += qual_txt
 
     color = {"High": "#28a678", "Moderate": "#e6a117", "Low": "#d94f3d"}[level]
     return {"level": level, "color": color, "note": note, "n_reports": n}
@@ -1124,7 +1363,7 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .meta .cell.span2 {{ grid-column: span 2; }}
   .meta .cell.row-last {{ border-bottom: none; }}
   .meta .lbl {{ font-size: 9px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #5a6b7e; }}
-  .meta .val {{ font-size: 14.5px; font-weight: 600; color: #152742; margin-top: 3px; }}
+  .meta .val {{ font-size: 13.5px; font-weight: 600; color: #152742; margin-top: 3px; }}
     .val {{ overflow-wrap: anywhere; }}
 
   .keyfind {{ margin-top: 6px; display: table; width: 100%; box-sizing: border-box;
@@ -1141,7 +1380,7 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .keyfind h2 .fig {{ color: {kf_accent}; }}
   .kf-sub {{ font-size: 12.5px; color: #4a5d76; line-height: 1.4; margin-top: 7px; }}
   .kf-sub b {{ color: #152742; font-weight: 600; }}
-  .kf-note {{ font-size: 10.5px; color: #6b7d94; line-height: 1.38; margin-top: 5px; }}
+  .kf-note {{ font-size: 10px; color: #6b7d94; line-height: 1.34; margin-top: 4px; }}
   .kf-badge-cell {{ white-space: nowrap; }}
   .kf-badge {{ display: inline-block; background: {kf_accent}; color: #fff; font-size: 13px; font-weight: 700;
     letter-spacing: .08em; text-transform: uppercase; padding: 12px 18px; border-radius: 8px; white-space: nowrap; }}
@@ -1176,12 +1415,12 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .conf .conf-body p + p {{ margin-top: 5px; }}
 
   .method {{ margin-top: 5px; }}
-  .method p {{ font-size: 11px; color: #4a5d76; line-height: 1.42; margin-top: 4px; }}
+  .method p {{ font-size: 10.5px; color: #4a5d76; line-height: 1.38; margin-top: 3px; }}
   .method p.mesh-disc {{ color: #152742; font-weight: 600; }}
 
   .disc {{ margin-top: 5px; background: #f0f4f8; border-radius: 8px; padding: 6px 16px; margin-bottom: 44px; }}
   .disc .dl {{ font-size: 9px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #8a99ab; margin-bottom: 5px; }}
-  .disc p {{ font-size: 9px; color: #8a99ab; line-height: 1.42; }}
+  .disc p {{ font-size: 8.5px; color: #8a99ab; line-height: 1.38; }}
   .disc b, .disc strong {{ color: #5a6b7e; }}
 
   .spacer {{ display: none; }}
@@ -1222,7 +1461,8 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
         <div class="cell span2"><div class="lbl">Property Address</div><div class="val">{address}</div></div>
         <div class="cell c3"><div class="lbl">Claim / Reference</div><div class="val">{claim_ref}</div></div>
         <div class="cell row-last"><div class="lbl">Coordinates</div><div class="val">{coords}</div></div>
-        <div class="cell span2 c3 row-last"></div>
+        <div class="cell row-last"><div class="lbl">Radar Coverage Quality</div><div class="val">{radar_quality}</div></div>
+        <div class="cell c3 row-last"><div class="lbl">Address Match</div><div class="val">{geocode_quality}</div></div>
       </div>
 
       <div class="keyfind">
@@ -1382,10 +1622,10 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
         for label, d, hot in _rows)
 
     table_caption = data.get("tableCaption") or (
-        "Each row is the PEAK radar-estimated diameter within that radius, not an "
-        "average and not a measurement at the address. The MRMS grid is &asymp;1 km, "
-        "so &lsquo;nearest grid cell&rsquo; already covers roughly a city block. "
-        "&mdash; means no valid radar data in that footprint.")
+        "Each row is the PEAK radar-estimated diameter within that radius \u2014 not an "
+        "average, and not a measurement at the address. The MRMS grid is &asymp;1 km, so "
+        "&lsquo;nearest grid cell&rsquo; already covers roughly a city block. A larger "
+        "radius can only ever report the same value or a bigger one.")
 
     # ---- Confidence chip: suppressed entirely when coverage is unusable ---
     _conf_level = data.get("confidenceLevel") or ""
@@ -1402,12 +1642,17 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
     _nearby = data.get("corroborationLine") or ""
     nearby_html = f"<p>{_nearby}</p>" if _nearby else ""
 
-    methodology = data.get("methodologyText",
+    _method_default = (
         "Hail-size estimates are derived from NOAA&rsquo;s Multi-Radar Multi-Sensor (MRMS) "
         "Maximum Estimated Size of Hail (MESH) product &mdash; a single-polarisation radar "
         "algorithm that infers in-storm hail growth from reflectivity above a modelled "
         "freezing level. This report reads the 24-hour maximum field (MESH_Max_1440min) "
-        "for the local date of loss, converted from millimetres at 25.4 mm per inch.")
+        "covering the property&rsquo;s local calendar day. It is a rolling 24-hour "
+        "maximum sampled up to three hours past local midnight, so hail in the early "
+        "hours of the next morning can contribute. Radar coverage quality is NOAA&rsquo;s "
+        "Radar Quality Index (0&ndash;1, from terrain-blockage maps and beam height) &mdash; "
+        "an indicator of whether the radar could see this point, not a hail-specific score.")
+    methodology = data.get("methodologyText", _method_default)
     disclaimer = data.get("disclaimerText",
         "This is a radar-derived estimate, not a guarantee of hail size or property damage, "
         "and is not a substitute for a physical inspection by a qualified professional. "
@@ -1431,6 +1676,8 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
         address=soft_wrap_html(clip_text(data["propertyAddress"], 110)),
         claim_ref=clip_text(data["claimRef"], 28),
         coords=data["coordinates"],
+        radar_quality=data.get("radarQuality", "Not assessed"),
+        geocode_quality=data.get("geocodeQuality", "Unknown"),
         kf_accent=t["main"], kf_bg=t["tint"], kf_bd=t["tintBorder"],
         icon=icon,
         verdict=cls.get("verdict", ""),

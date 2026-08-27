@@ -157,16 +157,27 @@ check("confidence Moderate radar-only above thresh", c_mod["level"] == "Moderate
 # D7: a radar-based NEGATIVE is weaker evidence than a positive, so a clean
 # not-detected is capped at Moderate (it used to claim High).
 c_clear = hc.assess_confidence(0.1, 0.1, [], 0.75)
-check("confidence Moderate (not High) for clean not-detected",
+check("bare not-detected (no quality known) stays Moderate",
       c_clear["level"] == "Moderate", c_clear["level"])
 # D1: no radar coverage -> NO confidence level at all, and never a size.
 c_none = hc.assess_confidence(None, None, [], 0.75, coverage_state="none")
 check("no confidence level when coverage is missing", c_none["level"] is None,
       str(c_none["level"]))
 # D1: partial coverage downgrades confidence rather than asserting it.
-c_part = hc.assess_confidence(1.5, 1.6, [], 0.75, coverage_state="partial")
-check("partial coverage downgrades confidence", c_part["level"] == "Low",
+# PR 2: degraded RADAR QUALITY (NOAA RQI) is what downgrades, not a guess
+# derived from the sparse MESH field.
+c_part = hc.assess_confidence(1.5, 1.6, [], 0.75, coverage_state="partial",
+                              quality_grade="Poor")
+check("poor radar quality downgrades confidence", c_part["level"] == "Low",
       c_part["level"])
+# An uncorroborated result with UNKNOWN quality must not claim High.
+c_unk = hc.assess_confidence(0.1, 0.1, [], 0.75, quality_grade="Not assessed")
+check("unknown quality caps a bare negative at Moderate",
+      c_unk["level"] == "Moderate", c_unk["level"])
+# A clean measured view earns a confident negative.
+c_clean = hc.assess_confidence(0.1, 0.1, [], 0.75, quality_grade="Excellent")
+check("excellent quality earns a High negative", c_clean["level"] == "High",
+      c_clean["level"])
 
 print("\n[12] WIND endpoint (fetchers mocked)")
 import perils

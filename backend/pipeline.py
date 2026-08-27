@@ -18,7 +18,17 @@ import hail_core as hc
 
 #  Bumped whenever the numbers on the report change meaning. Printed in the PDF
 #  footer so any archived report can be traced to the logic that produced it.
-METHODOLOGY_VERSION = "v2.0"
+METHODOLOGY_VERSION = "v2.1"
+
+
+_GEOCODE_LABEL = {"rooftop": "Rooftop", "interpolated": "Address range",
+                  "street": "Street centreline", "area": "Area centroid",
+                  "manual": "Manual coordinates", "unknown": "Unspecified"}
+
+
+def _geocode_label(loc: dict) -> str:
+    """Short human label for how precisely the address was pinned (T0-9)."""
+    return _GEOCODE_LABEL.get(loc.get("precision", "unknown"), "Unspecified")
 
 
 def _coord_str(lat: float, lon: float) -> str:
@@ -69,6 +79,7 @@ def generate_report(
     font_dir: str | None = None,
     out_dir: str | None = None,
     _grib_paths: list | None = None,   # test seam: skip S3 if provided
+    _rqi: dict | None = None,          # test seam: inject an RQI reading
 ) -> dict:
     """Run geocode -> S3 fetch -> parse -> sample -> map -> PDF.
 
@@ -96,8 +107,23 @@ def generate_report(
 
     # 4. read + sample (nearest cell, plus 0.5/1/3/5-mile peaks)
     lats, lons, mesh_mm = hc.max_mesh_over_files(grib_paths, loc["lat"], loc["lon"], pad_deg=0.30)
-    coverage = hc.assess_coverage(lats, lons, mesh_mm, loc["lat"], loc["lon"])
     rings = hc.sample_rings(lats, lons, mesh_mm, loc["lat"], loc["lon"], rings=(0.5, 1, 3, 5))
+
+    # 4a. Radar COVERAGE QUALITY from NOAA's RQI product — an independent field.
+    # This is the only thing that can tell a radar gap from a hail-free cell;
+    # the MESH grid cannot (it is sparse). Best-effort: if RQI can't be had, the
+    # report says "not assessed" rather than guessing either way.
+    if _rqi is not None:
+        rqi = _rqi                                  # test seam
+    else:
+        try:
+            rqi = hc.fetch_rqi_at_point(utc_start, utc_end, loc["lat"], loc["lon"], tmpdir)
+        except Exception:
+            rqi = {"value": None, "n_files": 0, "source": None}
+    rqi_grade = hc.grade_rqi(rqi.get("value"))
+    rqi_grade["source"] = rqi.get("source")
+    _hc_cells, _tot_cells = hc.count_hail_cells(lats, lons, mesh_mm, loc["lat"], loc["lon"])
+    coverage = hc.assess_coverage(rqi_grade, _hc_cells, _tot_cells)
 
     # Two DISTINCT readings, never conflated (defect D6 / T0-3):
     #   cell_in  = value at the single nearest ~1 km grid cell
@@ -120,7 +146,8 @@ def generate_report(
     except Exception:
         reports = []
     confidence = hc.assess_confidence(peak_in, rings[1]["in"], reports, threshold_in,
-                                      source, coverage_state=coverage["state"])
+                                      source, coverage_state=coverage["state"],
+                                      quality_grade=coverage["quality_grade"])
     corrob_line = hc.corroboration_line(reports, 12.0, coverage["state"])
 
     # 5. footprint map
@@ -143,6 +170,11 @@ def generate_report(
         "propertyAddress": loc["label"],
         "claimRef": claim_ref or "\u2014",
         "coordinates": _coord_str(loc["lat"], loc["lon"]),
+        "radarQuality": (
+            f'{coverage["quality_grade"]}'
+            + (f' ({coverage["quality_value"]:.2f})'
+               if coverage.get("quality_value") is not None else "")),
+        "geocodeQuality": _geocode_label(loc),
         "contactUrl": contact_url, "contactCity": contact_city,
         "bandLabel": band_label, "reportTitle": report_title,
         "thresholdInches": threshold_in,
@@ -181,6 +213,7 @@ def generate_report(
         "half_in": half_in,
         "coverage": coverage,
         "classification": classification,
+        "rqi": rqi_grade,
         "data_source": source,
         "confidence": confidence,
         "reports": reports,
