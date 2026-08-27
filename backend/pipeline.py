@@ -16,6 +16,10 @@ import datetime as dt
 
 import hail_core as hc
 
+#  Bumped whenever the numbers on the report change meaning. Printed in the PDF
+#  footer so any archived report can be traced to the logic that produced it.
+METHODOLOGY_VERSION = "v2.0"
+
 
 def _coord_str(lat: float, lon: float) -> str:
     ns = "N" if lat >= 0 else "S"
@@ -90,18 +94,24 @@ def generate_report(
     else:
         grib_paths, keys, source = _fetch_grib_paths(utc_start, utc_end, tmpdir, date_of_loss)
 
-    # 4. read + sample (At Property and 1/3/5-mile maxima)
+    # 4. read + sample (nearest cell, plus 0.5/1/3/5-mile peaks)
     lats, lons, mesh_mm = hc.max_mesh_over_files(grib_paths, loc["lat"], loc["lon"], pad_deg=0.30)
+    coverage = hc.assess_coverage(lats, lons, mesh_mm, loc["lat"], loc["lon"])
     rings = hc.sample_rings(lats, lons, mesh_mm, loc["lat"], loc["lon"], rings=(0.5, 1, 3, 5))
-    point_in = rings["point"]["in"]
-    # "At Property" basis: the peak MESH within 0.5 mile of the geocoded point,
-    # not just the single nearest grid cell. The MRMS grid is ~1 km and street
-    # geocoding is routinely off by a few hundred feet, so nearest-cell-only can
-    # miss a storm core that clipped the property (false negatives). Half a mile
-    # covers grid resolution + geocode wobble without borrowing a neighbor's storm.
-    ap = rings[0.5] if rings[0.5]["in"] >= point_in else rings["point"]
-    at_property_in = ap["in"]
-    detected = bool(at_property_in >= threshold_in)
+
+    # Two DISTINCT readings, never conflated (defect D6 / T0-3):
+    #   cell_in  = value at the single nearest ~1 km grid cell
+    #   half_in  = PEAK anywhere within half a mile. This is the headline figure
+    #              because the grid is ~1 km and street geocoding is routinely
+    #              off by a few hundred feet — but it is a peak over an area and
+    #              the report must say so, not call it "at the property".
+    cell_in = rings["point"]["in"]
+    half_in = rings[0.5]["in"]
+    peak_in = max([v for v in (cell_in, half_in) if v is not None], default=None)
+
+    classification = hc.classify_hail(peak_in, cell_in, threshold_in, coverage["state"])
+    detected = bool(classification.get("detected"))
+    at_property_in = peak_in          # kept for the API's existing metrics contract
 
     # 4b. ground-truth corroboration + confidence (best-effort; never fatal)
     try:
@@ -109,31 +119,44 @@ def generate_report(
                                          date_of_loss, radius_miles=12.0)
     except Exception:
         reports = []
-    confidence = hc.assess_confidence(at_property_in, rings[1]["in"], reports, threshold_in, source)
-    corrob_line = hc.corroboration_line(reports, 12.0)
+    confidence = hc.assess_confidence(peak_in, rings[1]["in"], reports, threshold_in,
+                                      source, coverage_state=coverage["state"])
+    corrob_line = hc.corroboration_line(reports, 12.0, coverage["state"])
 
     # 5. footprint map
     map_path = os.path.join(out_dir, "hail_footprint.png")
     hc.make_footprint_map(lats, lons, mesh_mm, loc["lat"], loc["lon"], 1.0, map_path, brand=hc.BRAND)
 
     # 6. report ID + data dict + PDF
-    report_id = f"CC-{date_of_loss:%Y}-{abs(hash((loc['label'], str(date_of_loss)))) % 100000:05d}"
+    report_id = hc.stable_report_id(loc["label"], date_of_loss)
+    generated = dt.datetime.now(dt.timezone.utc)
 
-    def fmt(d): return {"in": f"{d['in']:.2f}", "mm": f"{d['mm']:.0f}"}
+    def fmt(d):
+        return {"in": d["in"], "mm": d["mm"]}
+
     data = {
         "reportId": report_id,
-        "dateGenerated": f"{dt.date.today():%B %d, %Y}",
+        "dateGenerated": f"{generated:%B %d, %Y}",
+        "generatedUtc": f"{generated:%Y-%m-%d %H:%M UTC}",
+        "versionLine": f"methodology {METHODOLOGY_VERSION}",
         "dateOfLoss": f"{date_of_loss:%B %d, %Y}",
         "propertyAddress": loc["label"],
-        "claimRef": claim_ref or "—",
+        "claimRef": claim_ref or "\u2014",
         "coordinates": _coord_str(loc["lat"], loc["lon"]),
         "contactUrl": contact_url, "contactCity": contact_city,
         "bandLabel": band_label, "reportTitle": report_title,
-        "detected": detected, "thresholdInches": threshold_in,
-        "results": {"atProperty": fmt(ap), "mile1": fmt(rings[1]),
-                    "mile3": fmt(rings[3]), "mile5": fmt(rings[5])},
+        "thresholdInches": threshold_in,
+        "classification": classification,
+        "coverage": coverage,
+        "results": {"cell": fmt(rings["point"]), "half": fmt(rings[0.5]),
+                    "mile1": fmt(rings[1]), "mile3": fmt(rings[3]),
+                    "mile5": fmt(rings[5])},
         "mapDataUri": hc.png_to_data_uri(map_path),
-        "mapCaption": f"Estimated hail footprint — NOAA MRMS MESH, {date_of_loss:%B %d, %Y}.",
+        "mapCaption": (
+            f"No radar coverage at this location on {date_of_loss:%B %d, %Y}; the map "
+            f"shows the search area only."
+            if coverage["state"] == "none" else
+            f"Estimated hail footprint \u2014 NOAA MRMS MESH, {date_of_loss:%B %d, %Y}."),
         "confidenceLevel": confidence["level"],
         "confidenceColor": confidence["color"],
         "confidenceNote": confidence["note"],
@@ -154,6 +177,10 @@ def generate_report(
         "tz_name": tz_name,
         "files_used": keys,
         "threshold_in": threshold_in,
+        "cell_in": cell_in,
+        "half_in": half_in,
+        "coverage": coverage,
+        "classification": classification,
         "data_source": source,
         "confidence": confidence,
         "reports": reports,

@@ -28,7 +28,6 @@ import math
 import shutil
 import tempfile
 import datetime as dt
-from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -484,92 +483,207 @@ def haversine_miles(lat1, lon1, lat2, lon2):
     return 2 * R * np.arcsin(np.sqrt(a))
 
 
-def sample_point_and_radius(lats, lons, mesh_mm, lat, lon, radius_miles):
-    """Return both readings the report needs:
-
-      * point  : MESH at the single grid cell nearest the property
-      * radius : the MAXIMUM MESH within `radius_miles` of the property
-                 (accounts for ~1 km grid resolution + geocoding wobble)
-
-    Returns a dict with mm and inch values plus where the radius-max occurred.
-    """
-    LON, LAT = np.meshgrid(lons, lats)
-    dist = haversine_miles(lat, lon, LAT, LON)
-
-    # --- nearest cell (the property point) ---
-    flat_idx = np.nanargmin(dist)
-    pi, pj = np.unravel_index(flat_idx, dist.shape)
-    point_mm = float(np.nan_to_num(mesh_mm[pi, pj], nan=0.0))
-
-    # --- maximum within the radius ---
-    in_radius = dist <= radius_miles
-    if not in_radius.any():
-        # Radius smaller than one grid cell: fall back to the nearest cell.
-        in_radius = np.zeros_like(dist, dtype=bool)
-        in_radius[pi, pj] = True
-
-    vals = np.where(in_radius, mesh_mm, np.nan)
-    if np.all(np.isnan(vals)):
-        max_mm, mlat, mlon, ncells = 0.0, lat, lon, int(in_radius.sum())
-    else:
-        midx = np.nanargmax(vals)
-        mi, mj = np.unravel_index(midx, vals.shape)
-        max_mm = float(np.nan_to_num(mesh_mm[mi, mj], nan=0.0))
-        mlat, mlon = float(lats[mi]), float(lons[mj])
-        ncells = int(in_radius.sum())
-
-    return {
-        "point_mm": point_mm,
-        "point_in": point_mm / MM_PER_INCH,
-        "point_cell_lat": float(lats[pi]),
-        "point_cell_lon": float(lons[pj]),
-        "radius_max_mm": max_mm,
-        "radius_max_in": max_mm / MM_PER_INCH,
-        "radius_max_lat": mlat,
-        "radius_max_lon": mlon,
-        "radius_cells": ncells,
-        "radius_miles": radius_miles,
-    }
-
-
-def sample_rings(lats, lons, mesh_mm, lat, lon, rings=(1, 3, 5)):
+def sample_rings(lats, lons, mesh_mm, lat, lon, rings=(0.5, 1, 3, 5)):
     """Value at the property (nearest cell) plus the MAX within each ring radius.
 
-    This fills the report's four-row table: 'At Property', 'Within 1 mile',
-    'Within 3 miles', 'Within 5 miles'. Returns:
-        {'point': {'in','mm'}, 1: {'in','mm','lat','lon'}, 3:{...}, 5:{...}}
+    CRITICAL (defect D1): a cell with NO RADAR COVERAGE is NaN, and NaN is NOT
+    zero hail. This function therefore returns ``None`` for mm/in whenever the
+    footprint contains no valid radar data at all, and reports how many cells
+    were valid. Callers must render "coverage unavailable", never "0.00 in".
+
+    Returns {'point': {...}, 0.5: {...}, 1: {...}, 3: {...}, 5: {...}} where each
+    entry is {'mm', 'in', 'lat', 'lon', 'valid_cells', 'total_cells'} and mm/in
+    are None when no valid cell was found.
     """
     LON, LAT = np.meshgrid(lons, lats)
     dist = haversine_miles(lat, lon, LAT, LON)
+    finite = np.isfinite(mesh_mm)
 
     pi, pj = np.unravel_index(np.nanargmin(dist), dist.shape)
-    point_mm = float(np.nan_to_num(mesh_mm[pi, pj], nan=0.0))
-    out = {"point": {"mm": point_mm, "in": point_mm / MM_PER_INCH,
-                     "lat": float(lats[pi]), "lon": float(lons[pj])}}
+    p_valid = bool(finite[pi, pj])
+    p_mm = float(mesh_mm[pi, pj]) if p_valid else None
+    out = {"point": {"mm": p_mm,
+                     "in": (p_mm / MM_PER_INCH) if p_mm is not None else None,
+                     "lat": float(lats[pi]), "lon": float(lons[pj]),
+                     "valid_cells": int(p_valid), "total_cells": 1}}
 
     for r in rings:
         mask = dist <= r
         if not mask.any():
+            mask = np.zeros_like(dist, dtype=bool)
             mask[pi, pj] = True
-        vals = np.where(mask, mesh_mm, np.nan)
-        if np.all(np.isnan(vals)):
-            out[r] = {"mm": 0.0, "in": 0.0, "lat": lat, "lon": lon}
-        else:
-            mi, mj = np.unravel_index(np.nanargmax(vals), vals.shape)
-            mm = float(np.nan_to_num(mesh_mm[mi, mj], nan=0.0))
-            out[r] = {"mm": mm, "in": mm / MM_PER_INCH,
-                      "lat": float(lats[mi]), "lon": float(lons[mj])}
+        valid = mask & finite
+        n_total, n_valid = int(mask.sum()), int(valid.sum())
+        if n_valid == 0:
+            # No radar coverage anywhere in this footprint. NOT zero hail.
+            out[r] = {"mm": None, "in": None, "lat": lat, "lon": lon,
+                      "valid_cells": 0, "total_cells": n_total}
+            continue
+        vals = np.where(valid, mesh_mm, np.nan)
+        mi, mj = np.unravel_index(np.nanargmax(vals), vals.shape)
+        mm = float(mesh_mm[mi, mj])
+        out[r] = {"mm": mm, "in": mm / MM_PER_INCH,
+                  "lat": float(lats[mi]), "lon": float(lons[mj]),
+                  "valid_cells": n_valid, "total_cells": n_total}
     return out
 
 
-def decide_detection(sample: dict, threshold_in: float):
-    """Hail 'detected' if the worst reading within the radius meets the threshold.
+# -----------------------------------------------------------------------------
+#  RADAR COVERAGE STATE  (defect D1 — "no data" must never look like "no hail")
+# -----------------------------------------------------------------------------
 
-    Using the radius-max (not just the point) is the forensically conservative
-    choice: it reflects the largest hail the radar saw essentially at the property.
+#  Fraction of cells inside COVERAGE_RADIUS_MI that must carry valid radar data
+#  before we are willing to state a hail size at all. Tunable via env.
+COVERAGE_RADIUS_MI = 5.0
+COVERAGE_OK_FRAC = 0.80      # >= this -> "ok"
+COVERAGE_MIN_FRAC = 0.50     # >= this -> "partial";  below -> "none"
+
+
+def assess_coverage(lats, lons, mesh_mm, lat, lon, radius_miles=COVERAGE_RADIUS_MI):
+    """Classify radar coverage around the property as 'ok' | 'partial' | 'none'.
+
+    MRMS encodes no-coverage / missing with large negative sentinels, which
+    read_mesh_grib turns into NaN. A location in a radar gap or behind terrain
+    blockage (very relevant in the Black Hills) therefore has few or no valid
+    cells — and MUST NOT be reported as 0.00 in / NOT DETECTED.
+
+    Returns {state, valid_frac, valid_cells, total_cells, radius_miles}.
     """
-    worst_in = max(sample["radius_max_in"], sample["point_in"])
-    return bool(worst_in >= threshold_in)
+    LON, LAT = np.meshgrid(lons, lats)
+    dist = haversine_miles(lat, lon, LAT, LON)
+    mask = dist <= radius_miles
+    if not mask.any():
+        pi, pj = np.unravel_index(np.nanargmin(dist), dist.shape)
+        mask = np.zeros_like(dist, dtype=bool)
+        mask[pi, pj] = True
+    total = int(mask.sum())
+    valid = int((mask & np.isfinite(mesh_mm)).sum())
+    frac = (valid / total) if total else 0.0
+    if frac >= COVERAGE_OK_FRAC:
+        state = "ok"
+    elif frac >= COVERAGE_MIN_FRAC:
+        state = "partial"
+    else:
+        state = "none"
+    return {"state": state, "valid_frac": frac, "valid_cells": valid,
+            "total_cells": total, "radius_miles": radius_miles}
+
+
+# -----------------------------------------------------------------------------
+#  HAIL CLASSIFICATION  (T0-2 / T0-3 / T0-4)
+# -----------------------------------------------------------------------------
+#  Two independent judgements, deliberately kept apart:
+#
+#    * detected  -> a BUSINESS badge: did the radar peak meet the client's
+#                   damage threshold (default 0.75 in, overridable per request)?
+#    * likelihood-> a SCIENCE statement anchored to published verification, not
+#                   to the client's threshold. Anchors used:
+#                     0.50 in  practical floor; below this MESH cannot
+#                              discriminate hail from ordinary convection
+#                              (Witt SHI is ~6 at 0.25 in — that is "there was
+#                              a storm", not "there was hail").
+#                     1.14 in  = 29 mm, the best operational MESH proxy for a
+#                              1.00 in ground report (Wendt & Jirak 2021).
+#                     2.00 in  significant-hail territory.
+#
+#  Thresholds drive badges. Thresholds NEVER hide a value (defect T0-2).
+# -----------------------------------------------------------------------------
+
+MESH_DISCRIMINATION_FLOOR_IN = 0.50
+MESH_SEVERE_PROXY_IN = 1.14      # 29 mm — Wendt & Jirak (2021)
+SIGNIFICANT_HAIL_IN = 2.00
+
+MESH_DISCLOSURE = (
+    "MESH is NOAA&rsquo;s radar-derived 75th-percentile maximum estimated hail size, "
+    "not a stone measured at this address.")
+
+
+def classify_hail(peak_in, cell_in, threshold_in, coverage_state="ok"):
+    """Turn the sampled numbers into the report's verdict, badge and theme.
+
+    `peak_in` is the peak within 1/2 mile; `cell_in` is the nearest grid cell.
+    Either may be None (no valid radar data). Returns a dict consumed directly
+    by the PDF template.
+    """
+    thr = f"{threshold_in:.2f}\u2033"
+
+    if coverage_state == "none" or peak_in is None:
+        return {
+            "band": "no_coverage", "theme": "unknown", "detected": None,
+            "badge": "Coverage Unavailable",
+            "verdict": "Radar coverage was unavailable at this location on this date.",
+            "detail": ("No hail size can be stated. This is an absence of data, "
+                       "not evidence that hail did not occur."),
+            "likelihood": "Cannot be determined",
+        }
+
+    detected = bool(peak_in >= threshold_in)
+
+    if peak_in <= 0.0:
+        band, theme = "none", "clear"
+        badge = "None Detected"
+        verdict = "Radar shows no hail signature at this property on this date."
+        detail = ("A radar-based negative is weaker evidence than a positive. "
+                  "Small or brief hail can fall below what the radar resolves.")
+        likelihood = "No indication"
+    elif peak_in < MESH_DISCRIMINATION_FLOOR_IN:
+        band, theme = "trace", "caution"
+        badge = "Trace / Indeterminate"
+        verdict = "Damaging hail is UNLIKELY to have occurred at this property."
+        detail = ("The radar value is below the level at which MESH can "
+                  "distinguish hail from ordinary convection. The figure is "
+                  "reported for completeness, not as verified hail.")
+        likelihood = "Unlikely"
+    elif peak_in < 0.75:
+        band, theme = "indicated", "caution"
+        badge = "Hail Indicated"
+        verdict = ("Small hail is INDICATED near this property, below the "
+                   "0.75\u2033 threshold commonly used for roof damage.")
+        detail = ("Hail at this size is generally not associated with functional "
+                  "damage to conventional roofing, but is not zero.")
+        likelihood = "Possible \u2014 sub-threshold"
+    elif peak_in < MESH_SEVERE_PROXY_IN:
+        band, theme = "threshold", "detected"
+        badge = "At or Above Threshold"
+        verdict = (f"Hail of {thr} or greater is PROBABLE within \u00bd mile of "
+                   f"this property.")
+        detail = ("Occurrence of 1.00\u2033 (NWS severe) hail is UNCERTAIN at this "
+                  "radar value \u2014 published verification puts the best match to a "
+                  "1.00\u2033 ground report at MESH 1.14\u2033.")
+        likelihood = "Probable"
+    elif peak_in < SIGNIFICANT_HAIL_IN:
+        band, theme = "severe", "detected"
+        badge = "Severe Hail Likely"
+        verdict = ("Hail of 1.00\u2033 or greater is LIKELY to have occurred within "
+                   "\u00bd mile of this property.")
+        detail = ("This radar value is at or above 1.14\u2033, the best operational "
+                  "MESH match to a verified 1.00\u2033 ground report "
+                  "(Wendt &amp; Jirak 2021).")
+        likelihood = "Likely"
+    else:
+        band, theme = "significant", "detected"
+        badge = "Significant Hail Likely"
+        verdict = ("Hail of 1.00\u2033 or greater is LIKELY, and radar indicates "
+                   "significant hail within \u00bd mile of this property.")
+        detail = ("Radar values in this range are associated with hail capable of "
+                  "damaging most conventional roofing materials.")
+        likelihood = "Likely \u2014 significant"
+
+    return {"band": band, "theme": theme, "detected": detected, "badge": badge,
+            "verdict": verdict, "detail": detail, "likelihood": likelihood}
+
+
+def stable_report_id(label: str, date_of_loss, prefix: str = "CC") -> str:
+    """Deterministic report ID (defect D4).
+
+    The old implementation used Python's hash(), which is randomised per process
+    by PYTHONHASHSEED — so the same address and date produced a DIFFERENT id
+    after every deploy, and 5 decimal digits collide at roughly 370 reports.
+    A SHA-1 digest is stable forever and collides far later.
+    """
+    import hashlib
+    seed = f"{label}|{date_of_loss}".encode("utf-8")
+    return f"{prefix}-{date_of_loss:%Y}-{hashlib.sha1(seed).hexdigest()[:8].upper()}"
 
 
 # =============================================================================
@@ -693,51 +807,79 @@ def fetch_storm_reports(lat, lon, utc_start, utc_end, date_of_loss, radius_miles
     return deduped
 
 
-def assess_confidence(point_in, ring_max_in, reports, threshold_in, source=None):
+def assess_confidence(point_in, ring_max_in, reports, threshold_in, source=None,
+                      coverage_state="ok"):
     """Combine radar + ground reports into a stated confidence level.
 
-    Heuristic (clearly labelled as such on the report). Returns
-    {level, color, note}.
+    Returns {level, color, note, n_reports} — or level=None when radar coverage
+    was insufficient, in which case the report shows NO confidence chip at all
+    (defect D1 + D7: we must never print a confident verdict over missing data).
+
+    Note: the full confidence matrix additionally weights radar range/beam
+    height. That arrives with the radar-quality score; until then a clean
+    negative is capped at Moderate rather than High.
     """
-    radar_max = max(point_in, ring_max_in)
+    if coverage_state == "none" or point_in is None:
+        return {"level": None, "color": None, "n_reports": len(reports),
+                "note": ("Radar coverage was insufficient at this location on this "
+                         "date, so no confidence level is stated. This is an absence "
+                         "of data, not evidence that hail did not occur.")}
+
+    radar_max = max(point_in, ring_max_in if ring_max_in is not None else point_in)
     detected = point_in >= threshold_in
     n = len(reports)
     biggest = max([r["size_in"] for r in reports if r["size_in"]], default=0.0)
+    partial = (coverage_state == "partial")
 
     if detected:
         if n >= 1:
             level = "High"
             note = (f"Radar-estimated hail is corroborated by {n} independent ground "
                     f"report(s) within the search area"
-                    + (f" (largest {biggest:.2f}″)." if biggest else "."))
+                    + (f" (largest {biggest:.2f}\u2033)." if biggest else "."))
         elif radar_max >= threshold_in + 0.50:
             level = "Moderate"
             note = ("Radar estimate is well above the threshold, but no independent "
-                    "ground report was logged nearby. Storm reports are sparse, so "
-                    "this does not contradict the radar.")
+                    "ground report was logged nearby. Storm reports are sparse in "
+                    "rural areas, so this does not contradict the radar.")
         else:
             level = "Moderate"
-            note = ("Radar estimate is near the threshold with no nearby ground report; "
-                    "treat as a borderline result.")
+            note = ("Radar estimate is near the threshold with no nearby ground "
+                    "report; treat as a borderline result.")
     else:
         if n >= 1:
             level = "Low"
             note = (f"Radar did not meet the threshold at the property, yet {n} hail "
-                    f"report(s) were logged nearby — verify exact timing and location.")
+                    f"report(s) were logged nearby \u2014 verify exact timing and location.")
         else:
-            level = "High"
+            # A radar-based NEGATIVE is inherently weaker than a positive: brief or
+            # small hail can fall below what the radar resolves, and ground reports
+            # are sparse where nobody lives. Capped at Moderate (was: High).
+            level = "Moderate"
             note = ("Radar shows no significant hail at the property and no ground "
-                    "reports were logged nearby on this date.")
+                    "reports were logged nearby. A radar-based negative is weaker "
+                    "evidence than a positive \u2014 brief or small hail can fall below "
+                    "what the radar resolves.")
+
+    if partial:
+        level = {"High": "Moderate", "Moderate": "Low", "Low": "Low"}[level]
+        note += (" Radar coverage at this location was only partial, so confidence "
+                 "has been reduced accordingly.")
 
     color = {"High": "#28a678", "Moderate": "#e6a117", "Low": "#d94f3d"}[level]
     return {"level": level, "color": color, "note": note, "n_reports": n}
 
 
-def corroboration_line(reports, radius_miles) -> str:
+def corroboration_line(reports, radius_miles, coverage_state="ok") -> str:
     """One-line human summary of the nearest ground reports (for the report)."""
     if not reports:
+        if coverage_state == "none":
+            return (f"No independent ground reports within {radius_miles:.0f} miles on "
+                    f"this date either. Ground reports are sparse in rural areas and "
+                    f"their absence is not evidence that hail did not occur.")
         return (f"No independent ground reports within {radius_miles:.0f} miles on this "
-                f"date (radar-only estimate).")
+                f"date (radar-only estimate). Ground reports are sparse in rural areas; "
+                f"their absence does not contradict the radar.")
     parts = []
     for r in reports[:3]:
         size = f"{r['size_in']:.2f}″" if r["size_in"] else "hail"
@@ -813,7 +955,7 @@ def make_footprint_map(lats, lons, mesh_mm, lat, lon, radius_miles, out_png,
 
 
 # =============================================================================
-#  7.  FONTS + PDF REPORT  (reportlab)
+#  7.  ASSET HELPERS FOR THE PDF
 # =============================================================================
 
 # Brand colours (also exported for the map / notebook).
@@ -829,53 +971,6 @@ BRAND = {
     "tagline":  "Fairness in Every Claim",
     "contact":  "clearclaimsco.co",
 }
-
-
-def register_fonts(font_dir: str | None):
-    """Register DM Serif Display (headings) + Outfit (body) with reportlab.
-
-    Returns a dict naming the heading / body / body-bold fonts to use. If the
-    TTFs aren't present or registration fails, falls back to Helvetica so the
-    PDF still builds.
-    """
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-
-    fonts = {"head": "Helvetica-Bold", "body": "Helvetica", "body_bold": "Helvetica-Bold"}
-    if not font_dir or not os.path.isdir(font_dir):
-        return fonts
-
-    def _try(name, filename):
-        # Register one font file; return True only if it actually loads.
-        # Exceptions (e.g. an unsupported variable font on older reportlab) are
-        # caught here so one bad font never blocks the others.
-        path = os.path.join(font_dir, filename)
-        if not os.path.isfile(path):
-            return False
-        try:
-            pdfmetrics.registerFont(TTFont(name, path))
-            return True
-        except Exception as exc:                   # pragma: no cover
-            print(f"[fonts] could not load {filename} ({exc}); skipping it.")
-            return False
-
-    try:
-        if _try("DMSerif", "DMSerifDisplay-Regular.ttf"):
-            fonts["head"] = "DMSerif"
-        # Body: accept either a static weight or the variable font (saved as
-        # Outfit-Regular.ttf). Variable fonts register fine at their default weight.
-        if _try("Outfit", "Outfit-Regular.ttf") or _try("Outfit", "Outfit[wght].ttf"):
-            fonts["body"] = "Outfit"
-        # Bold body: use a real bold/semibold weight if present, otherwise reuse
-        # the regular Outfit so the typeface stays consistent (never Helvetica).
-        if _try("Outfit-Bold", "Outfit-SemiBold.ttf") or _try("Outfit-Bold", "Outfit-Bold.ttf"):
-            fonts["body_bold"] = "Outfit-Bold"
-        elif fonts["body"] == "Outfit":
-            fonts["body_bold"] = "Outfit"
-    except Exception as exc:                       # pragma: no cover
-        print(f"[fonts] registration failed ({exc}); using Helvetica fallback.")
-        return {"head": "Helvetica-Bold", "body": "Helvetica", "body_bold": "Helvetica-Bold"}
-    return fonts
 
 
 def png_to_data_uri(png_path: str) -> str:
@@ -899,6 +994,12 @@ _THEME_DETECTED = dict(main="#d94f3d", dark="#c0392b", deep="#a23a2c",
                        tint="#fdecea", tintBorder="#f3c4bd", rowTint="#fdf1ef")
 _THEME_CLEAR = dict(main="#28a678", dark="#1b8a5f", deep="#176b4a",
                     tint="#e8f6f0", tintBorder="#bfe6d5", rowTint="#edf8f3")
+_THEME_CAUTION = dict(main="#e6a117", dark="#c98c10", deep="#a5720c",
+                      tint="#fdf6e7", tintBorder="#f2e0b4", rowTint="#fdf9ef")
+_THEME_UNKNOWN = dict(main="#5a6b7e", dark="#4a5d76", deep="#3b4c62",
+                      tint="#eef2f7", tintBorder="#d5dfea", rowTint="#f4f7fa")
+_THEMES = {"detected": _THEME_DETECTED, "clear": _THEME_CLEAR,
+           "caution": _THEME_CAUTION, "unknown": _THEME_UNKNOWN}
 
 # The shield logo (light version, for the dark header) — exact path data from brand.
 _LOGO_SVG = (
@@ -916,6 +1017,14 @@ _ICON_TRIANGLE = ('<svg width="27" height="27" viewBox="0 0 24 24" fill="none" s
                   'stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">'
                   '<path d="M10.3 3.9 2.4 18a1.9 1.9 0 0 0 1.7 2.9h15.8a1.9 1.9 0 0 0 1.7-2.9L13.7 3.9a1.9 1.9 0 0 0-3.4 0Z"/>'
                   '<path d="M12 9v4.5"/><path d="M12 17v.01"/></svg>')
+_ICON_INFO = ('<svg width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="#fff" '
+              'stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">'
+              '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 7.5v.01"/></svg>')
+_ICON_QUESTION = ('<svg width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="#fff" '
+                  'stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">'
+                  '<circle cx="12" cy="12" r="9"/>'
+                  '<path d="M9.4 9.2a2.7 2.7 0 0 1 5.2.9c0 1.8-2.6 2.7-2.6 2.7"/>'
+                  '<path d="M12 17.2v.01"/></svg>')
 _ICON_CHECK = ('<svg width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="#fff" '
                'stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">'
                '<path d="M20 6.5 9.2 17.3 4 12.1"/></svg>')
@@ -968,7 +1077,7 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   /* Fixed one-page height + clip = the report can never spill to a 2nd page. */
   .page {{ width: 8.5in; height: 11in; overflow: hidden; display: block; position: relative; }}
 
-  .hdr {{ background: #06101f; padding: 13px 40px; display: flex; align-items: center; justify-content: space-between; }}
+  .hdr {{ background: #06101f; padding: 11px 40px; display: flex; align-items: center; justify-content: space-between; }}
   .brand {{ display: flex; align-items: center; gap: 14px; }}
   .brand svg.logo {{ width: 42px; height: 49px; display: block; }}
   .wm {{ font-family: 'DM Serif Display', serif; font-size: 25px; line-height: 1; color: #f0f4f8; white-space: nowrap; }}
@@ -979,24 +1088,24 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .hdr-right .site {{ font-size: 13px; font-weight: 600; color: #4a9af5; }}
   .hdr-right .loc {{ font-size: 13px; color: #b8cce0; margin-top: 4px; }}
 
-  .titleband {{ background: #0b1626; padding: 11px 40px; display: flex; align-items: baseline; justify-content: space-between; }}
+  .titleband {{ background: #0b1626; padding: 9px 40px; display: flex; align-items: baseline; justify-content: space-between; }}
   .titleband h1 {{ font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 27px; color: #f0f4f8; letter-spacing: .2px; }}
   .titleband .kick {{ font-size: 12px; font-weight: 500; letter-spacing: .28em; text-transform: uppercase; color: #5a6b7e; }}
 
-  .body {{ display: block; padding: 8px 40px 6px; }}
+  .body {{ display: block; padding: 6px 40px 4px; }}
 
   .meta {{ display: grid; grid-template-columns: 1fr 1fr 1fr; border: 1px solid #dde6f0; border-radius: 9px; overflow: hidden; }}
-  .meta .cell {{ padding: 5px 18px; border-right: 1px solid #e7eef6; border-bottom: 1px solid #e7eef6; min-width: 0; }}
+  .meta .cell {{ padding: 4px 16px; border-right: 1px solid #e7eef6; border-bottom: 1px solid #e7eef6; min-width: 0; }}
   .meta .cell.c3 {{ border-right: none; }}
   .meta .cell.span2 {{ grid-column: span 2; }}
   .meta .cell.row-last {{ border-bottom: none; }}
   .meta .lbl {{ font-size: 9px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #5a6b7e; }}
-  .meta .val {{ font-size: 15.5px; font-weight: 600; color: #152742; margin-top: 5px; }}
+  .meta .val {{ font-size: 14.5px; font-weight: 600; color: #152742; margin-top: 3px; }}
     .val {{ overflow-wrap: anywhere; }}
 
-  .keyfind {{ margin-top: 8px; display: table; width: 100%; box-sizing: border-box;
+  .keyfind {{ margin-top: 6px; display: table; width: 100%; box-sizing: border-box;
     background: {kf_bg}; border: 1px solid {kf_bd}; border-left: 5px solid {kf_accent};
-    border-radius: 10px; padding: 13px 20px; }}
+    border-radius: 10px; padding: 10px 18px; }}
   .kf-cell {{ display: table-cell; vertical-align: middle; }}
   .kf-icon-cell {{ width: 58px; min-width: 58px; }}
   .kf-icon {{ width: 52px; height: 52px; border-radius: 50%; background: {kf_accent};
@@ -1004,23 +1113,24 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .kf-icon svg {{ width: 30px; height: 30px; display: block; }}
   .kf-main {{ padding: 0 18px; }}
   .kf-lbl {{ font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: {kf_accent}; }}
-  .keyfind h2 {{ font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 22px; line-height: 1.12; color: #06101f; margin-top: 4px; }}
+  .keyfind h2 {{ font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 19.5px; line-height: 1.1; color: #06101f; margin-top: 4px; }}
   .keyfind h2 .fig {{ color: {kf_accent}; }}
-  .kf-sub {{ font-size: 13px; color: #4a5d76; line-height: 1.5; margin-top: 9px; }}
+  .kf-sub {{ font-size: 12.5px; color: #4a5d76; line-height: 1.4; margin-top: 7px; }}
   .kf-sub b {{ color: #152742; font-weight: 600; }}
+  .kf-note {{ font-size: 10.5px; color: #6b7d94; line-height: 1.38; margin-top: 5px; }}
   .kf-badge-cell {{ white-space: nowrap; }}
   .kf-badge {{ display: inline-block; background: {kf_accent}; color: #fff; font-size: 13px; font-weight: 700;
     letter-spacing: .08em; text-transform: uppercase; padding: 12px 18px; border-radius: 8px; white-space: nowrap; }}
 
   .seclbl {{ font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #152742; }}
 
-  .duo {{ margin-top: 8px; display: grid; grid-template-columns: 0.92fr 1.18fr; gap: 26px; align-items: start; }}
+  .duo {{ margin-top: 6px; display: grid; grid-template-columns: 0.92fr 1.18fr; gap: 26px; align-items: start; }}
 
-  table {{ width: 100%; border-collapse: collapse; margin-top: 9px; border-radius: 8px; overflow: hidden; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 7px; border-radius: 8px; overflow: hidden; }}
   thead th {{ background: #0e2138; color: #f0f4f8; text-align: left; font-size: 9.5px; font-weight: 600;
-    letter-spacing: .08em; text-transform: uppercase; padding: 10px 14px; }}
+    letter-spacing: .08em; text-transform: uppercase; padding: 7px 14px; }}
   thead th.num {{ text-align: right; }}
-  tbody td {{ padding: 6px 14px; font-size: 13px; color: #152742; border-bottom: 1px solid #e7eef6; }}
+  tbody td {{ padding: 4px 14px; font-size: 12.5px; color: #152742; border-bottom: 1px solid #e7eef6; }}
   tbody td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
   tbody tr:nth-child(even) {{ background: #f4f8fc; }}
   tbody tr.hot {{ background: {kf_bg}; }}
@@ -1028,25 +1138,26 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   tbody tr.hot td:first-child {{ box-shadow: inset 3px 0 0 {kf_accent}; }}
   tbody tr.hot td.num {{ color: {kf_accent}; }}
   tbody tr:last-child td {{ border-bottom: none; }}
-  .cap {{ font-size: 10px; color: #8a99ab; line-height: 1.45; margin-top: 8px; }}
+  .cap {{ font-size: 9px; color: #8a99ab; line-height: 1.4; margin-top: 6px; }}
 
   .map-wrap img {{ width: 100%; height: 163px; object-fit: contain; object-position: center; display: block;
     border: 1px solid #dde6f0; border-radius: 8px; background: #ffffff; }}
 
-  .conf {{ margin-top: 8px; border: 1px solid #dde6f0; border-radius: 10px; padding: 9px 20px;
+  .conf {{ margin-top: 6px; border: 1px solid #dde6f0; border-radius: 10px; padding: 7px 18px;
     display: flex; align-items: center; gap: 20px; }}
   .conf .chip {{ flex: 0 0 auto; color: #fff; font-size: 11px; font-weight: 700; letter-spacing: .1em;
     text-transform: uppercase; padding: 11px 16px; border-radius: 8px; }}
   .conf .conf-body .seclbl {{ margin-bottom: 6px; }}
-  .conf .conf-body p {{ font-size: 12.5px; color: #4a5d76; line-height: 1.5; }}
+  .conf .conf-body p {{ font-size: 11.5px; color: #4a5d76; line-height: 1.42; }}
   .conf .conf-body p + p {{ margin-top: 5px; }}
 
-  .method {{ margin-top: 6px; }}
-  .method p {{ font-size: 12px; color: #4a5d76; line-height: 1.5; margin-top: 5px; }}
+  .method {{ margin-top: 5px; }}
+  .method p {{ font-size: 11px; color: #4a5d76; line-height: 1.42; margin-top: 4px; }}
+  .method p.mesh-disc {{ color: #152742; font-weight: 600; }}
 
-  .disc {{ margin-top: 7px; background: #f0f4f8; border-radius: 8px; padding: 8px 18px; }}
+  .disc {{ margin-top: 5px; background: #f0f4f8; border-radius: 8px; padding: 6px 16px; margin-bottom: 44px; }}
   .disc .dl {{ font-size: 9px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #8a99ab; margin-bottom: 5px; }}
-  .disc p {{ font-size: 9.5px; color: #8a99ab; line-height: 1.5; }}
+  .disc p {{ font-size: 9px; color: #8a99ab; line-height: 1.42; }}
   .disc b, .disc strong {{ color: #5a6b7e; }}
 
   .spacer {{ display: none; }}
@@ -1094,20 +1205,21 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
         <div class="kf-cell kf-icon-cell"><div class="kf-icon">{icon}</div></div>
         <div class="kf-cell kf-main">
           <div class="kf-lbl">Key Finding</div>
-          <h2>Hail of {threshold} or greater <span class="fig">{verb}</span> at this property.</h2>
-          <div class="kf-sub">Maximum estimated hail at the property location on the date of loss was <b>{max_phrase}</b> &mdash; {thr} the {threshold} damage threshold.</div>
+          <h2>{verdict}</h2>
+          <div class="kf-sub">{kf_readings}</div>
+          <div class="kf-note">{kf_detail}</div>
         </div>
         <div class="kf-cell kf-badge-cell"><div class="kf-badge">{badge}</div></div>
       </div>
 
       <div class="duo">
         <div class="size-wrap">
-          <div class="seclbl">Estimated Maximum Hail Size</div>
+          <div class="seclbl">Radar-Estimated Hail Size</div>
           <table>
-            <thead><tr><th>Location</th><th class="num">In</th><th class="num">MM</th></tr></thead>
+            <thead><tr><th>Measurement</th><th class="num">In</th><th class="num">MM</th></tr></thead>
             <tbody>{est_rows}</tbody>
           </table>
-          <div class="cap">Values are peak radar-estimated diameters within each radius during storm passage. At Property is the peak within &frac12; mile of the geocoded location (radar grid &asymp;1 km).</div>
+          <div class="cap">{table_caption}</div>
         </div>
         <div class="map-wrap">
           <div class="seclbl">Hail Footprint</div>
@@ -1117,7 +1229,7 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
       </div>
 
       <div class="conf">
-        <div class="chip" style="background:{chip_bg};">{chip_text}</div>
+        {chip_html}
         <div class="conf-body">
           <div class="seclbl">Corroboration &amp; Confidence</div>
           <p>{corrob}</p>
@@ -1127,6 +1239,7 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
 
       <div class="method">
         <div class="seclbl">Methodology</div>
+        <p class="mesh-disc">{mesh_disclosure}</p>
         <p>{methodology}</p>
       </div>
 
@@ -1139,9 +1252,9 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <div class="foot">
-      <span>Report {report_id}</span>
+      <span>Report {report_id} &middot; {version_line}</span>
       <span class="conf-tag">CONFIDENTIAL</span>
-      <span>Page 1 of 1 &middot; Generated {report_date}</span>
+      <span>Page 1 of 1 &middot; Generated {generated_utc}</span>
     </div>
 
   </div>
@@ -1186,47 +1299,92 @@ def soft_wrap_html(text, limit=58):
 
 
 def build_report_html(data: dict, font_dir: str | None = None) -> str:
-    """Build the complete, self-contained HTML for one report.
+    """Build the complete, self-contained HTML for one hail report.
 
-    `data` keys (all pre-formatted strings unless noted):
-      reportId, dateGenerated, dateOfLoss, propertyAddress, claimRef,
-      coordinates, contactUrl, contactCity, bandLabel, reportTitle,
-      detected (bool), results {atProperty/mile1/mile3/mile5: {in,mm}},
-      mapDataUri (str or ''), mapCaption, methodologyText, disclaimerText
-    `font_dir` (optional): folder with the brand TTFs to embed via @font-face.
+    Expected `data` keys:
+      reportId, dateGenerated, generatedUtc, dateOfLoss, propertyAddress,
+      claimRef, coordinates, contactUrl, contactCity, bandLabel, reportTitle,
+      thresholdInches, versionLine,
+      classification  -> the dict returned by classify_hail()
+      coverage        -> the dict returned by assess_coverage()
+      results         -> {cell, half, mile1, mile3, mile5}; each {in, mm} where
+                         the values are floats OR None (None = no radar data)
+      mapDataUri, mapCaption, methodologyText, disclaimerText,
+      confidenceLevel, confidenceColor, confidenceNote, corroborationLine
     """
     font_face = _font_face_css(font_dir)
-    detected = bool(data["detected"])
-    t = _THEME_DETECTED if detected else _THEME_CLEAR
-    icon = _ICON_TRIANGLE if detected else _ICON_CHECK
-    status_text = "Detected" if detected else "Not Detected"
-    finding_verb = "was detected" if detected else "was not detected"
-    threshold_word = "above" if detected else "below"
-    threshold_label = f'{float(data.get("thresholdInches", 1.00)):.2f}″'
 
+    cls = data.get("classification") or {}
+    cov = data.get("coverage") or {}
+    theme_key = cls.get("theme", "unknown")
+    t = _THEMES.get(theme_key, _THEME_UNKNOWN)
+    icon = {"detected": _ICON_TRIANGLE, "clear": _ICON_CHECK,
+            "caution": _ICON_INFO, "unknown": _ICON_QUESTION}.get(theme_key, _ICON_QUESTION)
+
+    threshold_in = float(data.get("thresholdInches", 0.75))
     res = data["results"]
-    ap, m1, m3, m5 = res["atProperty"], res["mile1"], res["mile3"], res["mile5"]
-    max_value = f'{ap["in"]}″\u00a0({ap["mm"]}\u00a0mm)'
 
-    # Map area: real image if present, else the styled placeholder (template default).
-    if data.get("mapDataUri"):
-        map_block = (
-            f'<div style="height:128px; background-color:#dbe7f2; '
-            f'background-image:url(\'{data["mapDataUri"]}\'); background-size:cover; '
-            f'background-position:center; background-repeat:no-repeat;"></div>')
+    def num(v, dec=2):
+        """Format a reading, or an em-dash when there is no radar data."""
+        return f"{v:.{dec}f}" if v is not None else "\u2014"
+
+    def phrase(d):
+        if d.get("in") is None:
+            return "no radar data"
+        return f'{d["in"]:.2f}\u2033\u00a0({d["mm"]:.0f}\u00a0mm)'
+
+    cell, half = res["cell"], res["half"]
+
+    # ---- Key Finding readings line ---------------------------------------
+    if cls.get("band") == "no_coverage":
+        kf_readings = (f'Valid radar cells within {cov.get("radius_miles", 5):.0f} miles: '
+                       f'<b>{cov.get("valid_cells", 0)} of {cov.get("total_cells", 0)}</b> '
+                       f'({cov.get("valid_frac", 0.0) * 100:.0f}%).')
     else:
-        map_block = (
-            '<div style="position:relative; height:128px; background:#dbe7f2; overflow:hidden;">'
-            '<div style="position:absolute; inset:0; background:radial-gradient(circle at 50% 52%, '
-            'rgba(217,79,61,.78) 0%, rgba(230,161,23,.62) 26%, rgba(40,166,120,.42) 50%, rgba(219,231,242,0) 72%);"></div>'
-            '</div>')
+        kf_readings = (f'Peak within &frac12; mile: <b>{phrase(half)}</b> &nbsp;&middot;&nbsp; '
+                       f'value at nearest grid cell: <b>{phrase(cell)}</b> &nbsp;&middot;&nbsp; '
+                       f'client damage threshold: <b>{threshold_in:.2f}\u2033</b>.')
+    kf_detail = cls.get("detail", "")
+
+    # ---- Size table ------------------------------------------------------
+    _rows = [("Value at nearest grid cell", cell, False),
+             ("Peak within \u00bd mile", half, True),
+             ("Peak within 1 mile", res["mile1"], False),
+             ("Peak within 3 miles", res["mile3"], False),
+             ("Peak within 5 miles", res["mile5"], False)]
+    est_rows = "".join(
+        '<tr class="{c}"><td>{l}</td><td class="num">{i}</td><td class="num">{m}</td></tr>'.format(
+            c="hot" if hot else "", l=label,
+            i=num(d.get("in")), m=num(d.get("mm"), 0))
+        for label, d, hot in _rows)
+
+    table_caption = data.get("tableCaption") or (
+        "Each row is the PEAK radar-estimated diameter within that radius, not an "
+        "average and not a measurement at the address. The MRMS grid is &asymp;1 km, "
+        "so &lsquo;nearest grid cell&rsquo; already covers roughly a city block. "
+        "&mdash; means no valid radar data in that footprint.")
+
+    # ---- Confidence chip: suppressed entirely when coverage is unusable ---
+    _conf_level = data.get("confidenceLevel") or ""
+    if cls.get("band") == "no_coverage" or not _conf_level:
+        chip_html = ""
+        corrob = data.get("confidenceNote") or (
+            "No confidence level is stated because radar coverage was insufficient "
+            "at this location on this date.")
+    else:
+        chip_html = ('<div class="chip" style="background:{bg};">{txt}</div>'.format(
+            bg=data.get("confidenceColor", "#5a6b7e"),
+            txt=f"{_conf_level} Confidence"))
+        corrob = data.get("confidenceNote") or ""
+    _nearby = data.get("corroborationLine") or ""
+    nearby_html = f"<p>{_nearby}</p>" if _nearby else ""
 
     methodology = data.get("methodologyText",
-        "Hail-size estimates are derived from NOAA's Multi-Radar Multi-Sensor (MRMS) "
-        "Maximum Estimated Size of Hail (MESH) product — a radar algorithm that models "
-        "in-storm hail growth from reflectivity and freezing-level data. Reported values "
-        "represent the maximum estimated hail diameter within each radius during the "
-        "storm's passage over the property on the date of loss.")
+        "Hail-size estimates are derived from NOAA&rsquo;s Multi-Radar Multi-Sensor (MRMS) "
+        "Maximum Estimated Size of Hail (MESH) product &mdash; a single-polarisation radar "
+        "algorithm that infers in-storm hail growth from reflectivity above a modelled "
+        "freezing level. This report reads the 24-hour maximum field (MESH_Max_1440min) "
+        "for the local date of loss, converted from millimetres at 25.4 mm per inch.")
     disclaimer = data.get("disclaimerText",
         "This is a radar-derived estimate, not a guarantee of hail size or property damage, "
         "and is not a substitute for a physical inspection by a qualified professional. "
@@ -1234,26 +1392,6 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
         "report. Source data is U.S. NOAA public-domain radar. Clear Claims Co. is an "
         "independent provider and is <strong style=\"color:#5a6b7e;\">not affiliated with "
         "Cotality or CoreLogic</strong>.")
-
-    # --- new-design (2026-06 refresh) field mapping -------------------------
-    # non-breaking spaces: never split the reading from its unit across lines
-    max_phrase = f'{ap["in"]}″\u00a0({ap["mm"]}\u00a0mm)'
-
-    _est = [("At Property", ap, True), ("Within 1 mile", m1, False),
-            ("Within 3 miles", m3, False), ("Within 5 miles", m5, False)]
-    est_rows = "".join(
-        '<tr class="{c}"><td>{l}</td><td class="num">{i}</td><td class="num">{m}</td></tr>'.format(
-            c="hot" if hot else "", l=label, i=d["in"], m=d["mm"])
-        for label, d, hot in _est)
-
-    chip_bg = data.get("confidenceColor", "#28a678")
-    _conf_level = data.get("confidenceLevel") or ""
-    chip_text = f"{_conf_level} Confidence" if _conf_level else "Confidence"
-    corrob = data.get("confidenceNote") or (
-        "Radar-estimated hail is corroborated by independent ground reports "
-        "within the search area.")
-    _nearby = data.get("corroborationLine") or ""
-    nearby_html = f"<p>{_nearby}</p>" if _nearby else ""
 
     return _HAIL_REPORT_TEMPLATE.format(
         font_face=font_face,
@@ -1264,25 +1402,27 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
         band_label=data.get("bandLabel", "Weather Analysis"),
         report_id=data["reportId"],
         report_date=data["dateGenerated"],
+        generated_utc=data.get("generatedUtc", data["dateGenerated"]),
+        version_line=data.get("versionLine", "methodology v2"),
         date_of_loss=data["dateOfLoss"],
         address=soft_wrap_html(clip_text(data["propertyAddress"], 110)),
         claim_ref=clip_text(data["claimRef"], 28),
         coords=data["coordinates"],
         kf_accent=t["main"], kf_bg=t["tint"], kf_bd=t["tintBorder"],
         icon=icon,
-        threshold=threshold_label,
-        verb=finding_verb,
-        thr=threshold_word,
-        badge=status_text,
-        max_phrase=max_phrase,
+        verdict=cls.get("verdict", ""),
+        kf_readings=kf_readings,
+        kf_detail=kf_detail,
+        badge=cls.get("badge", ""),
         est_rows=est_rows,
+        table_caption=table_caption,
         footprint_src=data.get("mapDataUri", ""),
         footprint_caption=data.get(
             "mapCaption", "Estimated hail footprint &mdash; NOAA MRMS MESH."),
-        chip_bg=chip_bg,
-        chip_text=chip_text,
+        chip_html=chip_html,
         corrob=corrob,
         nearby_html=nearby_html,
+        mesh_disclosure=MESH_DISCLOSURE,
         methodology=methodology,
         disclaimer=disclaimer,
     )
@@ -1292,248 +1432,4 @@ def render_pdf_weasyprint(html: str, out_pdf: str) -> str:
     """Render the report HTML to a PDF using WeasyPrint (no browser required)."""
     from weasyprint import HTML
     HTML(string=html, base_url=".").write_pdf(out_pdf)
-    return out_pdf
-
-
-@dataclass
-class ReportInputs:
-    """Everything the PDF needs, gathered in one tidy object."""
-    report_id: str
-    address_label: str
-    lat: float
-    lon: float
-    location_source: str
-    date_of_loss: dt.date
-    tz_name: str
-    generated: dt.datetime
-    threshold_in: float
-    radius_miles: int
-    sample: dict
-    detected: bool
-    map_png: str
-    files_used: list = field(default_factory=list)
-
-
-def build_pdf(out_pdf: str, r: ReportInputs, fonts: dict, logo_path: str | None = None):
-    """Render the one-page branded Hail Verification Report PDF."""
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.units import inch
-    from reportlab.lib.utils import ImageReader
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.colors import HexColor
-
-    W, H = letter
-    c = canvas.Canvas(out_pdf, pagesize=letter)
-
-    midnight = HexColor(BRAND["midnight"])
-    slate = HexColor(BRAND["slate"])
-    accent = HexColor(BRAND["accent"])
-    bright = HexColor(BRAND["bright"])
-    green = HexColor(BRAND["green"])
-    coral = HexColor(BRAND["coral"])
-    ice = HexColor(BRAND["ice"])
-    ink = HexColor("#1f2c3d")
-    grey = HexColor("#5a6b7e")
-
-    result_color = coral if r.detected else green
-    M = 0.6 * inch                      # page margin
-
-    # ---------- HEADER BAND ----------
-    band_h = 0.95 * inch
-    c.setFillColor(midnight)
-    c.rect(0, H - band_h, W, band_h, fill=1, stroke=0)
-
-    logo_drawn = False
-    if logo_path and os.path.isfile(logo_path):
-        try:
-            img = ImageReader(logo_path)
-            iw, ih = img.getSize()
-            target_h = 0.55 * inch
-            target_w = target_h * iw / ih
-            c.drawImage(img, M, H - band_h + (band_h - target_h) / 2,
-                        width=target_w, height=target_h, mask="auto")
-            text_x = M + target_w + 12
-            logo_drawn = True
-        except Exception:
-            logo_drawn = False
-    if not logo_drawn:
-        text_x = M
-
-    # Wordmark: "Clear" white + "Claims" bright-blue + " Co." muted (brand spec).
-    from reportlab.pdfbase.pdfmetrics import stringWidth
-    wm_y = H - 0.50 * inch
-    c.setFont(fonts["head"], 22)
-    c.setFillColor(HexColor("#ffffff"))
-    c.drawString(text_x, wm_y, "Clear ")
-    x2 = text_x + stringWidth("Clear ", fonts["head"], 22)
-    c.setFillColor(bright)
-    c.drawString(x2, wm_y, "Claims")
-    x3 = x2 + stringWidth("Claims", fonts["head"], 22)
-    c.setFillColor(ice)
-    c.setFont(fonts["body"], 11)
-    c.drawString(x3 + 4, wm_y, "Co.")
-    c.setFillColor(ice)
-    c.setFont(fonts["body"], 9.5)
-    c.drawString(text_x, H - 0.68 * inch, BRAND["tagline"])
-
-    c.setFillColor(bright)
-    c.setFont(fonts["body_bold"], 9)
-    c.drawRightString(W - M, H - 0.50 * inch, BRAND["contact"])
-    c.setFillColor(ice)
-    c.setFont(fonts["body"], 8.5)
-    c.drawRightString(W - M, H - 0.66 * inch, "Radar-Based Hail Verification")
-
-    # Title strip
-    strip_y = H - band_h - 0.34 * inch
-    c.setFillColor(slate)
-    c.rect(0, strip_y, W, 0.34 * inch, fill=1, stroke=0)
-    c.setFillColor(HexColor("#ffffff"))
-    c.setFont(fonts["head"], 13)
-    c.drawString(M, strip_y + 0.10 * inch, "Hail Verification Report")
-    c.setFillColor(ice)
-    c.setFont(fonts["body"], 8)
-    c.drawRightString(W - M, strip_y + 0.11 * inch, f"Report {r.report_id}")
-
-    y = strip_y - 0.30 * inch
-
-    # ---------- METADATA BLOCK ----------
-    def meta_row(label, value, yy):
-        c.setFillColor(grey)
-        c.setFont(fonts["body_bold"], 7.5)
-        c.drawString(M, yy, label.upper())
-        c.setFillColor(ink)
-        c.setFont(fonts["body"], 10)
-        c.drawString(M + 1.55 * inch, yy, value)
-
-    coord_str = f"{r.lat:.5f} N, {abs(r.lon):.5f} {'W' if r.lon < 0 else 'E'}"
-    meta_row("Property", r.address_label, y); y -= 0.205 * inch
-    meta_row("Coordinates", f"{coord_str}   ({r.location_source})", y); y -= 0.205 * inch
-    meta_row("Date of Loss", f"{r.date_of_loss:%B %d, %Y}  (local: {r.tz_name})", y); y -= 0.205 * inch
-    meta_row("Report Generated", f"{r.generated:%B %d, %Y  %H:%M UTC}", y); y -= 0.28 * inch
-
-    # ---------- RESULTS PANEL ----------
-    panel_h = 1.18 * inch
-    panel_y = y - panel_h
-    c.setFillColor(HexColor("#f0f4f8"))
-    c.roundRect(M, panel_y, W - 2 * M, panel_h, 6, fill=1, stroke=0)
-    c.setFillColor(result_color)
-    c.roundRect(M, panel_y, 0.12 * inch, panel_h, 3, fill=1, stroke=0)
-
-    verdict = "HAIL DETECTED" if r.detected else "NO HAIL DETECTED"
-    c.setFillColor(result_color)
-    c.setFont(fonts["head"], 20)
-    c.drawString(M + 0.30 * inch, panel_y + panel_h - 0.42 * inch, verdict)
-
-    c.setFillColor(grey)
-    c.setFont(fonts["body"], 9)
-    thresh_txt = (f"Based on a detection threshold of {r.threshold_in:.2f}\" "
-                  f"(MESH within {r.radius_miles} mile"
-                  f"{'s' if r.radius_miles != 1 else ''} of the property).")
-    c.drawString(M + 0.30 * inch, panel_y + panel_h - 0.62 * inch, thresh_txt)
-
-    s = r.sample
-
-    def big_stat(x, label, value_in, value_mm, color=ink):
-        c.setFillColor(grey)
-        c.setFont(fonts["body_bold"], 7.5)
-        c.drawString(x, panel_y + 0.40 * inch, label.upper())
-        c.setFillColor(color)
-        c.setFont(fonts["head"], 17)
-        c.drawString(x, panel_y + 0.14 * inch, f"{value_in:.2f}\"")
-        c.setFillColor(grey)
-        c.setFont(fonts["body"], 8)
-        c.drawString(x + 0.78 * inch, panel_y + 0.18 * inch, f"({value_mm:.0f} mm)")
-
-    big_stat(M + 0.30 * inch, "Max hail at property", s["point_in"], s["point_mm"],
-             result_color)
-    big_stat(M + 3.05 * inch, f"Max within {r.radius_miles} mi",
-             s["radius_max_in"], s["radius_max_mm"], result_color)
-    c.setFillColor(grey)
-    c.setFont(fonts["body"], 7.5)
-    c.drawString(M + 5.55 * inch, panel_y + 0.40 * inch, "THRESHOLD")
-    c.setFillColor(ink)
-    c.setFont(fonts["head"], 17)
-    c.drawString(M + 5.55 * inch, panel_y + 0.14 * inch, f"{r.threshold_in:.2f}\"")
-
-    y = panel_y - 0.22 * inch
-
-    # ---------- MAP ----------
-    if r.map_png and os.path.isfile(r.map_png):
-        img = ImageReader(r.map_png)
-        iw, ih = img.getSize()
-        map_w = W - 2 * M
-        map_h = map_w * ih / iw
-        max_h = 3.0 * inch
-        if map_h > max_h:
-            map_h = max_h
-            map_w = map_h * iw / ih
-        c.drawImage(img, (W - map_w) / 2, y - map_h, width=map_w, height=map_h,
-                    mask="auto")
-        y = y - map_h - 0.12 * inch
-    c.setFillColor(grey)
-    c.setFont(fonts["body"], 7.5)
-    c.drawCentredString(W / 2, y,
-                        f"Estimated hail footprint — NOAA MRMS MESH, {r.date_of_loss:%B %d, %Y}. "
-                        f"Marker = property; blue ring = {r.radius_miles}-mile sampling radius.")
-    y -= 0.22 * inch
-
-    # ---------- METHODOLOGY ----------
-    def para(title, text, yy, size=8):
-        c.setFillColor(slate)
-        c.setFont(fonts["body_bold"], 8)
-        c.drawString(M, yy, title.upper())
-        yy -= 0.155 * inch
-        c.setFillColor(grey)
-        c.setFont(fonts["body"], size)
-        # simple word-wrap
-        from reportlab.pdfbase.pdfmetrics import stringWidth
-        max_w = W - 2 * M
-        words, line = text.split(), ""
-        for w in words:
-            test = (line + " " + w).strip()
-            if stringWidth(test, fonts["body"], size) > max_w:
-                c.drawString(M, yy, line); yy -= 0.135 * inch; line = w
-            else:
-                line = test
-        if line:
-            c.drawString(M, yy, line); yy -= 0.135 * inch
-        return yy - 0.06 * inch
-
-    method_txt = (
-        "Hail sizes are derived from NOAA's Multi-Radar/Multi-Sensor (MRMS) Maximum "
-        "Estimated Size of Hail (MESH) product — a radar algorithm that estimates the "
-        "largest hail a storm likely produced, on a grid of roughly 1 km (~0.6 mile) "
-        "cells. This report uses the 24-hour maximum (MESH_Max_1440min) for the local "
-        f"date of loss. Because each grid cell covers ~1 km and an address pinpoint can "
-        f"be slightly off, we report both the value at the nearest cell and the maximum "
-        f"within {r.radius_miles} mile(s). MESH is a radar ESTIMATE, not a measurement.")
-    y = para("Methodology", method_txt, y)
-
-    src_txt = ("Data source: NOAA Multi-Radar/Multi-Sensor System (MRMS), MESH product, "
-               "obtained from the NOAA Open Data Dissemination program on AWS "
-               "(s3://noaa-mrms-pds). NOAA data are public domain. This product is not "
-               "endorsed by and does not imply affiliation with NOAA.")
-    y = para("Data Source & Attribution", src_txt, y)
-
-    disc_txt = (
-        "DISCLAIMER: This is a radar-derived ESTIMATE provided for informational "
-        "purposes only. It is NOT a physical inspection, NOT a guarantee that hail "
-        "damage did or did not occur, and NOT a substitute for an on-site assessment "
-        "by a qualified adjuster or inspector. Clear Claims Co. makes no warranty and "
-        "accepts no liability arising from use of this report.")
-    y = para("Liability Disclaimer", disc_txt, y)
-
-    # ---------- FOOTER ----------
-    c.setFillColor(midnight)
-    c.rect(0, 0, W, 0.32 * inch, fill=1, stroke=0)
-    c.setFillColor(ice)
-    c.setFont(fonts["body"], 7.5)
-    c.drawString(M, 0.12 * inch, f"Report {r.report_id}")
-    c.setFillColor(bright)
-    c.drawCentredString(W / 2, 0.12 * inch, "CONFIDENTIAL")
-    c.setFillColor(ice)
-    c.drawRightString(W - M, 0.12 * inch, f"Generated {r.generated:%Y-%m-%d}  ·  Page 1 of 1")
-
-    c.showPage()
-    c.save()
     return out_pdf

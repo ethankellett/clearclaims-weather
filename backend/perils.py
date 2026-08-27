@@ -39,16 +39,34 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
             contact_url=contact_url, contact_city=contact_city, font_dir=fd,
             out_dir=out_dir, _grib_paths=_hail_grib_paths)
         rings = r["rings"]
-        ap_in = r.get("at_property_in", rings["point"]["in"])
+        cls = r.get("classification") or {}
+        cov = r.get("coverage") or {}
+        cell_in, half_in = r.get("cell_in"), r.get("half_in")
+
+        def _r2(v):
+            return round(v, 2) if v is not None else None
+
+        # Headline must say what the number IS (defect D6). Never "at property".
+        if cov.get("state") == "none" or half_in is None:
+            headline = "Radar coverage unavailable \u2014 no hail size stated"
+        else:
+            headline = f'Peak MESH {half_in:.2f}" within \u00bd mi of geocoded location'
+
         return {
             "peril": "hail", "pdf_path": r["pdf_path"], "report_id": r["report_id"],
             "detected": r["detected"], "confidence": r["confidence"],
             "data_source": r.get("data_source"), "n_reports": len(r.get("reports") or []),
-            "headline": f'Max hail {ap_in:.2f}" at property',
-            "metrics": {"at_property_in": round(ap_in, 2),
-                        "mile1_in": round(rings[1]["in"], 2),
-                        "mile3_in": round(rings[3]["in"], 2),
-                        "mile5_in": round(rings[5]["in"], 2)},
+            "headline": headline,
+            "coverage": cov.get("state"),
+            "badge": cls.get("badge"),
+            "likelihood": cls.get("likelihood"),
+            "metrics": {"cell_in": _r2(cell_in),
+                        "half_mile_in": _r2(half_in),
+                        # kept for backward compatibility with stored reports
+                        "at_property_in": _r2(half_in),
+                        "mile1_in": _r2(rings[1]["in"]),
+                        "mile3_in": _r2(rings[3]["in"]),
+                        "mile5_in": _r2(rings[5]["in"])},
             "location": r["location"], "threshold": thr,
         }
 

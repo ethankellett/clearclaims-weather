@@ -154,8 +154,19 @@ c_hi = hc.assess_confidence(3.8, 3.9, iem_reports, 0.75)
 check("confidence High when corroborated", c_hi["level"] == "High")
 c_mod = hc.assess_confidence(1.5, 1.6, [], 0.75)
 check("confidence Moderate radar-only above thresh", c_mod["level"] == "Moderate")
+# D7: a radar-based NEGATIVE is weaker evidence than a positive, so a clean
+# not-detected is capped at Moderate (it used to claim High).
 c_clear = hc.assess_confidence(0.1, 0.1, [], 0.75)
-check("confidence High for clean not-detected", c_clear["level"] == "High")
+check("confidence Moderate (not High) for clean not-detected",
+      c_clear["level"] == "Moderate", c_clear["level"])
+# D1: no radar coverage -> NO confidence level at all, and never a size.
+c_none = hc.assess_confidence(None, None, [], 0.75, coverage_state="none")
+check("no confidence level when coverage is missing", c_none["level"] is None,
+      str(c_none["level"]))
+# D1: partial coverage downgrades confidence rather than asserting it.
+c_part = hc.assess_confidence(1.5, 1.6, [], 0.75, coverage_state="partial")
+check("partial coverage downgrades confidence", c_part["level"] == "Low",
+      c_part["level"])
 
 print("\n[12] WIND endpoint (fetchers mocked)")
 import perils
