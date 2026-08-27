@@ -18,6 +18,12 @@ import wind_core as wc
 import snow_core as sc
 
 PERILS = ("hail", "wind", "snow")
+
+#  Shared with pipeline.py so all three perils stamp the same methodology version.
+METHODOLOGY_VERSION = "v2.2"
+_GEOCODE_LABEL = {"rooftop": "Rooftop", "interpolated": "Address range",
+                  "street": "Street centreline", "area": "Area centroid",
+                  "manual": "Manual coordinates", "unknown": "Unspecified"}
 DEFAULT_THRESHOLDS = {"hail": 0.75, "wind": 58.0, "snow": 6.0}
 
 
@@ -79,19 +85,26 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
     hc.validate_date_of_loss(date_of_loss)
     loc = hc.resolve_location(address, manual_lat, manual_lon)
     us, ue, tz = hc.local_day_utc_window(date_of_loss, loc["lat"], loc["lon"])
-    rid_seed = abs(hash((loc["label"], str(date_of_loss), peril))) % 100000
+    # D4, same defect the hail report had: hash() is randomised per process, so
+    # the same address and date produced a different id after every deploy.
+    import hashlib as _h
+    rid_seed = _h.sha1(f'{loc["label"]}|{date_of_loss}|{peril}'.encode()).hexdigest()[:8].upper()
 
     if peril == "wind":
         stations = wc.gather_station_gusts(loc["lat"], loc["lon"], us, ue, n=3)
         reports = wc.fetch_wind_reports(loc["lat"], loc["lon"], us, ue, date_of_loss, radius_miles=15.0)
         mp = os.path.join(out_dir, "wind_map.png")
         wc.make_wind_map(loc["lat"], loc["lon"], stations, reports, mp, brand=hc.BRAND)
-        rid = f"CC-W-{date_of_loss:%Y}-{rid_seed:05d}"
+        rid = f"CC-W-{date_of_loss:%Y}-{rid_seed}"
+        _gp = _GEOCODE_LABEL.get(loc.get("precision", "unknown"), "Unspecified")
         data = wc.build_wind_report_data(
             report_id=rid, address_label=loc["label"], lat=loc["lat"], lon=loc["lon"],
             date_of_loss=date_of_loss, contact_url=contact_url, contact_city=contact_city,
             claim_ref=claim_ref, threshold_mph=thr, station_gusts=stations,
             reports=reports, map_data_uri=hc.png_to_data_uri(mp))
+        data["geocodeQuality"] = _gp
+        data["versionLine"] = f"methodology {METHODOLOGY_VERSION}"
+        data["generatedUtc"] = f"{dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M UTC}"
         pdf = os.path.join(out_dir, f"Clear_Claims_Wind_Report_{rid}.pdf")
         wc.render(data, pdf, font_dir=fd)
         peak = data["_peak_mph"]
@@ -132,12 +145,15 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
     stations = sc.fetch_station_snowfall(loc["lat"], loc["lon"], date_of_loss, radius_miles=25.0)
     mp = os.path.join(out_dir, "snow_map.png")
     sc.make_snow_map(arr_depth, loc["lat"], loc["lon"], sc.SNODAS, mp, brand=hc.BRAND)
-    rid = f"CC-S-{date_of_loss:%Y}-{rid_seed:05d}"
+    rid = f"CC-S-{date_of_loss:%Y}-{rid_seed}"
     data = sc.build_snow_report_data(
         report_id=rid, address_label=loc["label"], lat=loc["lat"], lon=loc["lon"],
         date_of_loss=date_of_loss, contact_url=contact_url, contact_city=contact_city,
         claim_ref=claim_ref, threshold_in=thr, depth_mm=depth_mm, swe_mm=swe_mm,
         station_reports=stations, map_data_uri=hc.png_to_data_uri(mp))
+    data["geocodeQuality"] = _GEOCODE_LABEL.get(loc.get("precision", "unknown"), "Unspecified")
+    data["versionLine"] = f"methodology {METHODOLOGY_VERSION}"
+    data["generatedUtc"] = f"{dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M UTC}"
     pdf = os.path.join(out_dir, f"Clear_Claims_Snow_Report_{rid}.pdf")
     sc.render(data, pdf, font_dir=fd)
     return {

@@ -104,7 +104,9 @@ def build_report_html_generic(data: dict, font_dir: str | None = None) -> str:
       <div style="padding:9px 16px; border-bottom:1px solid #e7eef6;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Date of Loss</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px;">{data["dateOfLoss"]}</div></div>
       <div style="padding:9px 16px; border-right:1px solid #e7eef6; grid-column:span 2; min-width:0;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Property Address</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px; overflow-wrap:anywhere;">{hc.soft_wrap_html(hc.clip_text(data["propertyAddress"], 110))}</div></div>
       <div style="padding:9px 16px;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Claim / Reference</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px;">{hc.clip_text(data["claimRef"], 28)}</div></div>
-      <div style="padding:9px 16px; border-top:1px solid #e7eef6; grid-column:span 3;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Coordinates</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px; font-variant-numeric:tabular-nums;">{data["coordinates"]}</div></div>
+      <div style="padding:9px 16px; border-top:1px solid #e7eef6; border-right:1px solid #e7eef6;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Coordinates</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px; font-variant-numeric:tabular-nums;">{data["coordinates"]}</div></div>
+      <div style="padding:9px 16px; border-top:1px solid #e7eef6; border-right:1px solid #e7eef6;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Measurement Quality</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px;">{data.get("measurementQuality", "Not assessed")}</div></div>
+      <div style="padding:9px 16px; border-top:1px solid #e7eef6;"><div style="font-size:8.5px; letter-spacing:.1em; text-transform:uppercase; color:#7d8ea1; font-weight:600;">Address Match</div><div style="font-size:13px; color:#0c1a30; font-weight:600; margin-top:2px;">{data.get("geocodeQuality", "Unspecified")}</div></div>
     </div>
 
     <div style="margin-top:12px; background:{t['tint']}; border:1px solid {t['tintBorder']}; border-left:6px solid {t['main']}; border-radius:3px; padding:13px 18px; display:flex; align-items:center; gap:16px;">
@@ -164,9 +166,9 @@ def build_report_html_generic(data: dict, font_dir: str | None = None) -> str:
   </div>
 
   <div style="background:#06101f; padding:9px 44px; display:flex; align-items:center; justify-content:space-between; font-size:8.5px; color:#7d8ea1; letter-spacing:.04em;">
-    <span>Report {data["reportId"]}</span>
+    <span>Report {data["reportId"]} · {data.get("versionLine", "")}</span>
     <span style="color:#4a9af5; font-weight:600; letter-spacing:.1em; text-transform:uppercase;">Confidential</span>
-    <span>Page 1 of 1 · Generated {data["dateGenerated"]}</span>
+    <span>Page 1 of 1 · Generated {data.get("generatedUtc", data["dateGenerated"])}</span>
   </div>
 </div>
 </body></html>"""

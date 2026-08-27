@@ -238,30 +238,87 @@ def fetch_wind_reports(lat, lon, utc_start, utc_end, date_of_loss, radius_miles=
 
 
 # ---- confidence + map -----------------------------------------------------
-def assess_wind_confidence(peak_mph, n_stations, reports, threshold_mph):
+#  How far away is the nearest instrument? This is the whole ballgame for wind.
+#  A thunderstorm downburst is typically one to two miles across. An ASOS station
+#  twenty miles away that recorded nothing is very weak evidence that nothing
+#  happened at the property — but the old code called that High confidence.
+WIND_DISTANCE_GRADES = (
+    (5.0, "Excellent", "An official station sits within 5 miles of the property."),
+    (12.0, "Good", "The nearest official station is within 12 miles."),
+    (25.0, "Fair", "The nearest official station is 12\u201325 miles away \u2014 a "
+                   "localised downburst could pass between stations unrecorded."),
+)
+
+
+def grade_wind_distance(dist_mi):
+    """Grade how well the station network covers this property."""
+    if dist_mi is None:
+        return {"grade": "No measurement", "dist_mi": None,
+                "note": ("No official station reported a gust for this date, so there "
+                         "is no measurement to reason from.")}
+    for cut, grade, note in WIND_DISTANCE_GRADES:
+        if dist_mi <= cut:
+            return {"grade": grade, "dist_mi": dist_mi, "note": note}
+    return {"grade": "Poor", "dist_mi": dist_mi,
+            "note": (f"The nearest official station is {dist_mi:.0f} miles away. A "
+                     f"downburst is typically 1\u20132 miles wide and can easily miss "
+                     f"every station in a county.")}
+
+
+_WIND_RANK = {"Excellent": 4, "Good": 3, "Fair": 2, "Poor": 1, "No measurement": 0}
+
+
+def assess_wind_confidence(peak_mph, n_stations, reports, threshold_mph,
+                           nearest_dist_mi=None):
+    """Confidence in the wind verdict, weighted by how close the instrument was.
+
+    The asymmetry is deliberate and mirrors the hail report: a measured gust over
+    the threshold is strong evidence FOR damaging wind, but a measured gust under
+    the threshold twenty miles away is weak evidence AGAINST it. The previous
+    version returned High for any measured negative regardless of distance.
+    """
     detected = peak_mph is not None and peak_mph >= threshold_mph
     n = len(reports)
     has_measured = peak_mph is not None
+    q = grade_wind_distance(nearest_dist_mi)
+    rank = _WIND_RANK.get(q["grade"], 0)
+
     if detected:
         if n >= 1:
-            lvl, note = "High", (f"Peak gust of {peak_mph:.0f} mph is corroborated by "
-                                 f"{n} nearby wind report(s).")
-        elif has_measured:
-            lvl, note = "Moderate", (f"A measured gust of {peak_mph:.0f} mph meets the "
-                                     f"threshold, but no nearby storm report was logged.")
+            lvl = "High"
+            note = (f"A measured gust of {peak_mph:.0f} mph meets the "
+                    f"{threshold_mph:.0f} mph threshold and is corroborated by {n} "
+                    f"independent wind report(s) nearby.")
         else:
-            lvl, note = "Low", "Threshold met only by an estimated report; no measured gust."
+            lvl = "Moderate"
+            note = (f"A measured gust of {peak_mph:.0f} mph meets the "
+                    f"{threshold_mph:.0f} mph threshold, but no independent wind "
+                    f"report was logged nearby.")
+    elif not has_measured:
+        lvl = "Low"
+        note = ("No official station reported a gust for this date. This report can "
+                "neither confirm nor rule out damaging wind at the property."
+                + (f" {n} nearby wind report(s) were logged." if n else ""))
+    elif n >= 1:
+        lvl = "Low"
+        note = (f"No measured gust met the threshold, yet {n} wind report(s) were "
+                f"logged nearby \u2014 verify timing and station coverage.")
+    elif rank >= 4:
+        lvl = "High"
+        note = (f"The nearest official station, within {nearest_dist_mi:.0f} miles, "
+                f"measured a peak of {peak_mph:.0f} mph \u2014 below the "
+                f"{threshold_mph:.0f} mph threshold \u2014 and no wind reports were "
+                f"logged nearby.")
     else:
-        if n >= 1 and not has_measured:
-            lvl, note = "Low", (f"No measured gust met the threshold, but {n} wind "
-                                f"report(s) were logged nearby — verify station coverage.")
-        elif has_measured:
-            lvl, note = "High", (f"Nearest measured peak gust was {peak_mph:.0f} mph, "
-                                 f"below the {threshold_mph:.0f} mph threshold.")
-        else:
-            lvl, note = "Low", "No measured station gust and no reports were available."
+        # The old code said High here regardless of distance. It does not follow.
+        lvl = "Moderate" if rank >= 3 else "Low"
+        note = (f"The nearest official station measured a peak of {peak_mph:.0f} mph, "
+                f"below the {threshold_mph:.0f} mph threshold. {q['note']} A wind "
+                f"negative is weaker evidence than a positive.")
+
     color = {"High": "#28a678", "Moderate": "#e6a117", "Low": "#d94f3d"}[lvl]
-    return {"level": lvl, "color": color, "note": note, "n_reports": n}
+    return {"level": lvl, "color": color, "note": note, "n_reports": n,
+            "quality": q}
 
 
 def make_wind_map(lat, lon, stations, reports, out_png, brand=None):
@@ -305,40 +362,72 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
                            contact_url, contact_city, claim_ref, threshold_mph,
                            station_gusts, reports, map_data_uri, generated=None):
     generated = generated or dt.datetime.now(dt.timezone.utc)
-    measured = [s["gust_mph"] for s in station_gusts if s.get("gust_mph") is not None]
-    report_spds = [r["speed_mph"] for r in reports if r.get("speed_mph") is not None]
-    peak = max(measured + report_spds) if (measured or report_spds) else None
+    # Keep MEASURED and REPORTED separate. The old code took max() of both and
+    # called the result "peak estimated wind gust at/near the property", so a
+    # spotter's estimate fifteen miles away could read as the property's gust.
+    meas = [s for s in station_gusts if s.get("gust_mph") is not None]
+    measured_peak = max((s["gust_mph"] for s in meas), default=None)
+    nearest = min(meas, key=lambda s: s.get("dist_mi", 1e9)) if meas else None
+    nearest_dist = nearest.get("dist_mi") if nearest else None
+
+    rep_speeds = [r["speed_mph"] for r in reports if r.get("speed_mph") is not None]
+    reported_peak = max(rep_speeds) if rep_speeds else None
+
+    peak = max([v for v in (measured_peak, reported_peak) if v is not None],
+               default=None)
     detected = peak is not None and peak >= threshold_mph
-    conf = assess_wind_confidence(max(measured) if measured else None,
-                                  len(station_gusts), reports, threshold_mph)
+    conf = assess_wind_confidence(measured_peak, len(station_gusts), reports,
+                                  threshold_mph, nearest_dist_mi=nearest_dist)
+    quality = conf["quality"]
 
     ns = "N" if lat >= 0 else "S"; ew = "E" if lon >= 0 else "W"
     coord = f"{abs(lat):.4f}° {ns}, {abs(lon):.4f}° {ew}"
     thr = f"{threshold_mph:.0f} mph"
     peak_txt = f"{peak:.0f} mph" if peak is not None else "no measurement"
 
+    # Measured and reported are visually separated so nobody can read a spotter's
+    # estimate fifteen miles away as this property's gust.
     rows = []
-    if station_gusts:
-        s0 = station_gusts[0]
-        rows.append({"label": f"Nearest station ({s0.get('name', s0['id'])})",
-                     "c1": f"{s0['gust_mph']:.0f}", "c2": f"{s0['dist_mi']:.1f} mi",
-                     "highlight": True})
-        for s in station_gusts[1:3]:
-            rows.append({"label": f"Station {s.get('id','')}",
-                         "c1": f"{s['gust_mph']:.0f}", "c2": f"{s['dist_mi']:.1f} mi"})
+    if nearest is not None:
+        rows.append({"label": f"Measured — {nearest.get('name', nearest.get('id',''))}",
+                     "c1": f"{nearest['gust_mph']:.0f}",
+                     "c2": f"{nearest['dist_mi']:.1f} mi", "highlight": True})
+    for st in [x for x in meas if x is not nearest][:2]:
+        rows.append({"label": f"Measured — {st.get('id','')}",
+                     "c1": f"{st['gust_mph']:.0f}", "c2": f"{st['dist_mi']:.1f} mi"})
+    if not meas:
+        rows.append({"label": "Measured — none available", "c1": "—", "c2": "—"})
     if reports:
         big = max(reports, key=lambda r: (r.get("speed_mph") or 0))
-        rows.append({"label": "Peak nearby report",
+        rows.append({"label": "Reported nearby (not measured here)",
                      "c1": f"{big['speed_mph']:.0f}" if big.get("speed_mph") else "est.",
                      "c2": f"{big['dist_mi']:.1f} mi"})
-    if not rows:
-        rows.append({"label": "No station/report data", "c1": "—", "c2": "—"})
 
-    finding = (f'Damaging wind (≥ {thr}) <span style="color:{(hc._THEME_DETECTED if detected else hc._THEME_CLEAR)["dark"]};">'
-               f'{"was detected" if detected else "was not detected"}</span> at this property.')
-    sub = (f'Peak estimated wind gust at/near the property on the date of loss was '
-           f'<strong style="color:#06101f;">{peak_txt}</strong> — '
-           f'{"above" if detected else "below"} the {thr} damaging-wind threshold.')
+    _dk = (hc._THEME_DETECTED if detected else hc._THEME_CLEAR)["dark"]
+    if measured_peak is None and reported_peak is None:
+        finding = (f'No wind measurement was available <span style="color:{_dk};">'
+                   f'near this property</span> on this date.')
+        sub = ('No official station reported a gust and no wind reports were logged '
+               'nearby. This report can neither confirm nor rule out damaging wind '
+               'at the property.')
+    else:
+        finding = (f'Damaging wind (≥ {thr}) <span style="color:{_dk};">'
+                   f'{"was recorded" if detected else "was not recorded"}</span> '
+                   f'near this property.')
+        bits = []
+        if measured_peak is not None:
+            bits.append(
+                f'Peak <b>measured</b> gust <strong style="color:#06101f;">'
+                f'{measured_peak:.0f} mph</strong> at '
+                f'{nearest.get("id", "the nearest station")}'
+                + (f', {nearest_dist:.1f} mi away' if nearest_dist is not None else ''))
+        else:
+            bits.append('No official station measured a gust for this date')
+        if reported_peak is not None:
+            bits.append(f'peak <b>reported</b> gust {reported_peak:.0f} mph nearby')
+        sub = ("; ".join(bits) +
+               f'. Threshold is {thr}. Measured gusts are instrument readings at the '
+               f'station, not at the address.')
 
     return {
         "reportId": report_id, "dateGenerated": f"{generated:%B %d, %Y}",
@@ -350,7 +439,9 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
         "findingHtml": finding, "findingSubHtml": sub,
         "resultsTitle": "Peak Wind Gust", "colHeaders": {"label": "Source", "c1": "mph", "c2": "distance"},
         "rows": rows,
-        "resultsFootnote": "Measured gusts from official ASOS stations; reports from NWS/SPC.",
+        "resultsFootnote": ("Measured rows are instrument readings AT THE STATION, not at "
+                            "the address. Reported rows are spotter or storm reports nearby "
+                            "and may be estimates. " + quality["note"]),
         "mapTitle": "Wind Observations", "mapDataUri": map_data_uri,
         "mapCaption": f"Nearest stations and wind reports — {date_of_loss:%B %d, %Y}.",
         "legendGradient": "linear-gradient(90deg,#28a678,#7cc36a,#e6a117,#e07a2e,#d94f3d)",
@@ -374,6 +465,11 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
             "Clear Claims Co. is an independent provider and is <strong style=\"color:#5a6b7e;\">"
             "not affiliated with Cotality or CoreLogic</strong>."),
         "_detected": detected, "_peak_mph": peak, "_confidence": conf,
+        "_measured_peak_mph": measured_peak, "_reported_peak_mph": reported_peak,
+        "_nearest_dist_mi": nearest_dist, "_quality": quality,
+        "measurementQuality": (
+            f'{quality["grade"]}'
+            + (f' ({nearest_dist:.1f} mi)' if nearest_dist is not None else '')),
     }
 
 
@@ -383,7 +479,9 @@ def _wind_corrob_line(reports):
     parts = []
     for r in reports[:3]:
         spd = f"{r['speed_mph']:.0f} mph" if r.get("speed_mph") else "damage (est.)"
-        parts.append(f"{spd} — {r['dist_mi']:.1f} mi {r['dir']} ({r['source']})")
+        # Defensive: a malformed upstream record must not 500 an entire report.
+        parts.append(f"{spd} — {r.get('dist_mi', 0):.1f} mi "
+                     f"{r.get('dir', '')} ({r.get('source', 'report')})".replace("  ", " "))
     extra = f" +{len(reports) - 3} more" if len(reports) > 3 else ""
     return "Nearby reports: " + "; ".join(parts) + extra + "."
 

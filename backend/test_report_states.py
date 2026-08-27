@@ -349,6 +349,101 @@ check("falls back to a single page", "Pages:           1" in pg,
       [l for l in pg.splitlines() if l.startswith("Pages")])
 check("footer says 1 of 1", "Page 1 of 1" in t)
 
+print("\n=== 15. WIND PARITY (the D7-equivalent) ===")
+import wind_core as wc
+_r = lambda spd, d: {"speed_mph": spd, "dist_mi": d, "source": "NWS LSR", "dir": "NE"}
+_st = lambda mph, d: {"id": "KRAP", "name": "Rapid City", "gust_mph": mph, "dist_mi": d}
+
+# The bug: a below-threshold reading at a DISTANT station used to return High.
+far = wc.assess_wind_confidence(40.0, 1, [], 58.0, nearest_dist_mi=27.0)
+check("distant negative is no longer High", far["level"] != "High", far["level"])
+check("distant negative is Low", far["level"] == "Low", far["level"])
+check("distance is explained on the report", "miles away" in far["note"])
+near = wc.assess_wind_confidence(40.0, 1, [], 58.0, nearest_dist_mi=3.0)
+check("close negative still earns High", near["level"] == "High", near["level"])
+mid = wc.assess_wind_confidence(40.0, 1, [], 58.0, nearest_dist_mi=9.0)
+check("mid-range negative is Moderate", mid["level"] == "Moderate", mid["level"])
+none = wc.assess_wind_confidence(None, 0, [], 58.0, nearest_dist_mi=None)
+check("no measurement at all is Low", none["level"] == "Low", none["level"])
+check("no-measurement wording is honest",
+      "neither confirm nor rule out" in none["note"])
+pos = wc.assess_wind_confidence(71.0, 3, [_r(70, 4)], 58.0, nearest_dist_mi=4.0)
+check("corroborated positive is High", pos["level"] == "High", pos["level"])
+for d, want in [(4.0, "Excellent"), (9.0, "Good"), (20.0, "Fair"), (40.0, "Poor"),
+                (None, "No measurement")]:
+    check(f"wind distance {d} -> {want}",
+          wc.grade_wind_distance(d)["grade"] == want, wc.grade_wind_distance(d)["grade"])
+
+wd = wc.build_wind_report_data(
+    report_id="CC-W-TEST", address_label="1 Test St", lat=CY, lon=CX,
+    date_of_loss=DOL, contact_url="x", contact_city="y", claim_ref="",
+    threshold_mph=58.0, station_gusts=[_st(41.0, 22.0)], reports=[], map_data_uri="")
+check("measured peak kept separate from reported", wd["_measured_peak_mph"] == 41.0)
+check("nearest distance carried", wd["_nearest_dist_mi"] == 22.0)
+check("headline says 'near this property', not 'at'",
+      "near this property" in wd["findingHtml"] and "at this property" not in wd["findingHtml"])
+check("sub states the reading is at the station",
+      "not at the address" in wd["findingSubHtml"])
+check("rows label the basis", any("Measured" in r["label"] for r in wd["rows"]))
+check("measurement quality on the PDF meta", "Fair" in wd["measurementQuality"],
+      wd["measurementQuality"])
+
+wd2 = wc.build_wind_report_data(
+    report_id="CC-W-TEST2", address_label="1 Test St", lat=CY, lon=CX,
+    date_of_loss=DOL, contact_url="x", contact_city="y", claim_ref="",
+    threshold_mph=58.0, station_gusts=[], reports=[_r(70.0, 12.0)], map_data_uri="")
+check("a nearby REPORT is not presented as a measurement",
+      "Reported nearby (not measured here)" in [r["label"] for r in wd2["rows"]])
+
+print("\n=== 16. SNOW PARITY ===")
+import snow_core as sc
+# The bug: zero stations, yet the report claimed "nearby stations agree" at High.
+z = sc.assess_snow_confidence(1.0, [], 6.0)
+check("no-station negative is no longer High", z["level"] != "High", z["level"])
+check("no longer claims stations agree", "stations agree" not in z["note"])
+check("says plainly there was no station", "NO nearby station" in z["note"])
+check("calls it an unverified model negative",
+      "unverified model negative" in z["note"])
+_sr = lambda snow, d: {"snow_in": snow, "dist_mi": d, "dir": "N", "source": "COOP"}
+ok = sc.assess_snow_confidence(1.0, [_sr(0.5, 6.0)], 6.0)
+check("close corroborated negative earns High", ok["level"] == "High", ok["level"])
+far_s = sc.assess_snow_confidence(1.0, [_sr(0.5, 40.0)], 6.0)
+check("distant corroborated negative is Moderate", far_s["level"] == "Moderate",
+      far_s["level"])
+conflict = sc.assess_snow_confidence(1.0, [_sr(9.0, 8.0)], 6.0)
+check("conflicting station drops it to Low", conflict["level"] == "Low", conflict["level"])
+
+sd = sc.build_snow_report_data(
+    report_id="CC-S-TEST", address_label="1 Test St", lat=CY, lon=CX,
+    date_of_loss=DOL, contact_url="x", contact_city="y", claim_ref="",
+    threshold_in=6.0, depth_mm=254.0, swe_mm=40.0,
+    station_reports=[_sr(0.2, 9.0)], map_data_uri="")
+check("depth no longer called 'accumulation'",
+      "accumulation" not in sd["findingHtml"].lower(), sd["findingHtml"][:80])
+check("headline is about snow LOAD", "snow load" in sd["findingHtml"].lower())
+check("states depth includes older snowpack",
+      "includes" in sd["findingSubHtml"] and "older snowpack" in sd["findingSubHtml"])
+check("explicitly not a claim that snow fell that day",
+      "not a statement that snow fell on this date" in sd["findingSubHtml"])
+check("new snowfall reported separately",
+      any("NEW snowfall" in r["label"] for r in sd["rows"]))
+check("depth row marked as modelled",
+      any("modelled" in r["label"] for r in sd["rows"]))
+check("section header no longer says 'accumulation'",
+      "accumulation" not in sd["resultsTitle"].lower(), sd["resultsTitle"])
+
+print("\n=== 17. STABLE IDs FOR WIND & SNOW (D4) ===")
+import subprocess as _sp2, sys as _sys
+_code = ("import sys;sys.path.insert(0,'.');import hashlib,datetime as dt;"
+         "print(hashlib.sha1('1 Test St|2024-06-03|wind'.encode()).hexdigest()[:8].upper())")
+_a = _sp2.run([_sys.executable, "-c", _code], capture_output=True, text=True,
+              cwd=os.path.dirname(os.path.abspath(__file__)),
+              env={**os.environ, "PYTHONHASHSEED": "1"}).stdout.strip()
+_b = _sp2.run([_sys.executable, "-c", _code], capture_output=True, text=True,
+              cwd=os.path.dirname(os.path.abspath(__file__)),
+              env={**os.environ, "PYTHONHASHSEED": "999"}).stdout.strip()
+check("wind/snow id seed is deterministic across hash seeds", _a == _b and len(_a) == 8, _a)
+
 print(f"\n{'='*60}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("  FAILED: " + ", ".join(FAIL))

@@ -203,25 +203,73 @@ def make_snow_map(arr_depth_mm, lat, lon, geo, out_png, pad_deg=0.45, brand=None
 
 
 # ---- confidence -----------------------------------------------------------
+#  Station distance matters less for snow than for wind — snowfall is spatially
+#  far smoother than a downburst — but it still matters in complex terrain, which
+#  describes most of western South Dakota.
+SNOW_DISTANCE_GRADES = (
+    (10.0, "Excellent", "A reporting station sits within 10 miles."),
+    (25.0, "Good", "The nearest reporting station is within 25 miles."),
+)
+
+
+def grade_snow_station(dist_mi):
+    if dist_mi is None:
+        return {"grade": "No station", "dist_mi": None,
+                "note": ("No COOP/CoCoRaHS station reported snowfall near this property "
+                         "for this date, so the gridded model has no local check.")}
+    for cut, grade, note in SNOW_DISTANCE_GRADES:
+        if dist_mi <= cut:
+            return {"grade": grade, "dist_mi": dist_mi, "note": note}
+    return {"grade": "Fair", "dist_mi": dist_mi,
+            "note": (f"The nearest reporting station is {dist_mi:.0f} miles away; in "
+                     f"complex terrain, snowfall can differ sharply over that distance.")}
+
+
+_SNOW_RANK = {"Excellent": 3, "Good": 2, "Fair": 1, "No station": 0}
+
+
 def assess_snow_confidence(depth_in, station_reports, threshold_in):
+    """Confidence in the snow verdict.
+
+    Two corrections over the previous version:
+      1. The clean-negative branch used to return High with the note "nearby
+         stations agree" — a sentence it printed even when there were ZERO
+         nearby stations. Nothing can agree if nothing is there.
+      2. SNODAS is a MODEL analysis, not an instrument. An unchecked model
+         negative should not read as the strongest possible result.
+    """
     detected = depth_in is not None and depth_in >= threshold_in
     n = len(station_reports)
+    nearest = min((r["dist_mi"] for r in station_reports), default=None)
+    q = grade_snow_station(nearest)
+    rank = _SNOW_RANK.get(q["grade"], 0)
+
     if detected:
         if n >= 1:
-            lvl, note = "High", (f"Gridded snow depth is corroborated by {n} nearby "
-                                 f"station snowfall report(s).")
+            lvl = "High"
+            note = (f"Gridded snow depth meets the threshold and is corroborated by {n} "
+                    f"nearby station snowfall report(s).")
         else:
-            lvl, note = "Moderate", ("Gridded snow depth meets the threshold, but no "
-                                     "nearby station report was available to corroborate.")
+            lvl = "Moderate"
+            note = ("Gridded snow depth meets the threshold, but no nearby station "
+                    "report was available to corroborate the model.")
+    elif n >= 1 and any(r["snow_in"] >= threshold_in for r in station_reports):
+        lvl = "Low"
+        note = ("Gridded depth at the property is below threshold, but a nearby station "
+                "reported significant snowfall \u2014 verify location and timing.")
+    elif n >= 1:
+        lvl = "High" if rank >= 3 else "Moderate"
+        note = (f"Gridded snow depth is below the threshold and {n} nearby station "
+                f"report(s) are consistent with that. {q['note']}")
     else:
-        if n >= 1 and any(s["snow_in"] >= threshold_in for s in station_reports):
-            lvl, note = "Low", ("Gridded depth at the property is below threshold, but a "
-                                "nearby station reported significant snowfall — verify location.")
-        else:
-            lvl, note = "High", ("Gridded snow depth is below the threshold and nearby "
-                                 "stations agree.")
+        # No stations at all. The old code claimed High here and said stations agreed.
+        lvl = "Moderate"
+        note = ("Gridded snow depth is below the threshold, but NO nearby station "
+                "reported snowfall for this date, so the model has no independent "
+                "check. This is an unverified model negative, not a measurement.")
+
     color = {"High": "#28a678", "Moderate": "#e6a117", "Low": "#d94f3d"}[lvl]
-    return {"level": lvl, "color": color, "note": note, "n_reports": n}
+    return {"level": lvl, "color": color, "note": note, "n_reports": n, "quality": q}
 
 
 # ---- assemble report ------------------------------------------------------
@@ -241,21 +289,33 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
 
     nearest_snow = station_reports[0]["snow_in"] if station_reports else None
     rows = [
-        {"label": "Snow depth (at property)", "c1": f"{depth_in:.1f}", "c2": f"{depth_mm:.0f}" if depth_mm and not np.isnan(depth_mm) else "—", "highlight": True},
+        {"label": "Snow depth on ground (modelled)", "c1": f"{depth_in:.1f}", "c2": f"{depth_mm:.0f}" if depth_mm and not np.isnan(depth_mm) else "—", "highlight": True},
         {"label": "Snow-water-equiv (SWE)", "c1": f"{swe_in:.2f}", "c2": f"{swe_mm:.0f}" if swe_mm and not np.isnan(swe_mm) else "—"},
         {"label": "Roof load (from SWE)", "c1": f"{load_psf:.1f}", "c2": "psf"},
-        {"label": "Nearest station snowfall",
+        {"label": "NEW snowfall, nearest station",
          "c1": f"{nearest_snow:.1f}" if nearest_snow is not None else "—",
          "c2": f"{station_reports[0]['dist_mi']:.1f} mi" if station_reports else "—"},
     ]
 
     dk = (hc._THEME_DETECTED if detected else hc._THEME_CLEAR)["dark"]
-    finding = (f'Significant snow accumulation (≥ {thr}) <span style="color:{dk};">'
-               f'{"was present" if detected else "was not present"}</span> at this property.')
-    sub = (f'Estimated snow depth at the property on the date of loss was '
+    # IMPORTANT: SNODAS depth is snow ON THE GROUND, which includes older
+    # snowpack. It is the right measure for a roof-load or collapse question and
+    # the WRONG measure for "did it snow on this date". The previous wording said
+    # "significant snow accumulation was present", which reads as though it fell
+    # that day. New snowfall is reported separately, from the station.
+    finding = (f'Snow load of ≥ {thr} depth <span style="color:{dk};">'
+               f'{"was present on this property" if detected else "was not present on this property"}'
+               f'</span> on the date of loss.')
+    _new_txt = (f'nearest station reported <strong style="color:#06101f;">'
+                f'{nearest_snow:.1f}″</strong> of NEW snowfall'
+                if nearest_snow is not None else
+                'no nearby station reported new snowfall for this date')
+    sub = (f'Snow depth ON THE GROUND at the property was '
            f'<strong style="color:#06101f;">{depth_in:.1f}″</strong> '
-           f'(roof load ≈ <strong style="color:#06101f;">{load_psf:.0f} psf</strong>) — '
-           f'{"at/above" if detected else "below"} the {thr} significance threshold.')
+           f'(roof load ≈ <strong style="color:#06101f;">{load_psf:.0f} psf</strong>), '
+           f'{"at or above" if detected else "below"} the {thr} threshold. Depth includes '
+           f'any older snowpack and is not a statement that snow fell on this date — '
+           f'{_new_txt}.')
 
     return {
         "reportId": report_id, "dateGenerated": f"{generated:%B %d, %Y}",
@@ -263,12 +323,19 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
         "claimRef": claim_ref or "—", "coordinates": coord,
         "contactUrl": contact_url, "contactCity": contact_city,
         "bandLabel": "Snow Analysis", "reportTitle": "Snow Verification Report",
-        "flag": detected, "statusText": "Significant" if detected else "Below Threshold",
+        "flag": detected,
+        "statusText": "Load Present" if detected else "Below Threshold",
+        "measurementQuality": (
+            f'{conf["quality"]["grade"]}'
+            + (f' ({conf["quality"]["dist_mi"]:.0f} mi)'
+               if conf["quality"]["dist_mi"] is not None else '')),
         "findingHtml": finding, "findingSubHtml": sub,
-        "resultsTitle": "Snow Accumulation & Load",
+        "resultsTitle": "Snow Depth &amp; Roof Load",
         "colHeaders": {"label": "Measure", "c1": "in", "c2": "mm / dist"},
         "rows": rows,
-        "resultsFootnote": "Depth & SWE from SNODAS grid; snowfall from nearest station.",
+        "resultsFootnote": ("Depth and SWE are SNODAS MODEL values at the property; new "
+                            "snowfall is a station MEASUREMENT that may be miles away. "
+                            + conf["quality"]["note"]),
         "mapTitle": "Snow Depth Footprint", "mapDataUri": map_data_uri,
         "mapCaption": f"Estimated snow depth — NOAA SNODAS, {date_of_loss:%B %d, %Y}.",
         "legendGradient": "linear-gradient(90deg,#dbe7f2,#9ec6e6,#5a9bd4,#3b6fb0,#5a3b8a)",
@@ -292,6 +359,7 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
             "<strong style=\"color:#5a6b7e;\">not affiliated with Cotality or CoreLogic</strong>."),
         "_detected": detected, "_depth_in": round(depth_in, 1),
         "_load_psf": load_psf, "_confidence": conf,
+        "_new_snow_in": nearest_snow, "_quality": conf["quality"],
     }
 
 
