@@ -307,13 +307,21 @@ def _list_day_keys(fs, day: dt.date):
 
 
 def select_files_for_window(fs, utc_start: dt.datetime, utc_end: dt.datetime,
-                            max_files: int = 5, tail_buffer_hours: int = 3):
+                            max_files: int = 5, tail_buffer_minutes: int = 20):
     """Choose which MESH files to read for the local day.
 
     Key idea: MESH_Max_1440min is a *running 24-hour maximum*. The file
     timestamped at the END of the local day (in UTC) already contains the
-    largest hail over that entire day. We therefore prefer files at/just after
-    `utc_end`, and take a few of them (cell-wise max later) for robustness.
+    largest hail over that entire day — and ONLY that day. We therefore prefer
+    files at/just after `utc_end`, and take a few of them (cell-wise max later)
+    for robustness against a missing or corrupt end-of-day file.
+
+    v2.6 (D3): the tolerance past local midnight used to be 3 HOURS, which let
+    hail from the early hours of the NEXT morning blend into the date-of-loss
+    figure (each file's 24-h window slides forward with its timestamp). It is
+    now 20 minutes — enough to survive a missing end-of-day file (MRMS posts
+    every ~2 minutes) while keeping next-day contamination to minutes, and the
+    adjacent days are sampled separately so timing disputes can see them.
 
     Fallbacks keep it working at the edges of the archive (e.g. 'today', or a
     day whose tail spills past now): if nothing exists after utc_end, we take the
@@ -323,7 +331,7 @@ def select_files_for_window(fs, utc_start: dt.datetime, utc_end: dt.datetime,
     """
     # Candidate keys can live in the utc_start day folder and the utc_end day folder.
     candidate_days = sorted({utc_start.date(), utc_end.date(),
-                             (utc_end + dt.timedelta(hours=tail_buffer_hours)).date()})
+                             (utc_end + dt.timedelta(minutes=tail_buffer_minutes)).date()})
     keys = []
     for d in candidate_days:
         keys.extend(_list_day_keys(fs, d))
@@ -334,8 +342,8 @@ def select_files_for_window(fs, utc_start: dt.datetime, utc_end: dt.datetime,
     stamped = [(k, t) for k, t in stamped if t is not None]
     stamped.sort(key=lambda kt: kt[1])
 
-    window_hi = utc_end + dt.timedelta(hours=tail_buffer_hours)
-    # Files whose 24h-max window ends just after the local day ends:
+    window_hi = utc_end + dt.timedelta(minutes=tail_buffer_minutes)
+    # Files whose 24h-max window ends at/just after the local day ends:
     after = [kt for kt in stamped if utc_end <= kt[1] <= window_hi]
 
     if after:
@@ -400,7 +408,7 @@ def parse_iem_listing(html: str, folder_url: str):
     return [base + n for n in dict.fromkeys(names)]   # de-dup, keep order
 
 
-def select_iem_files_for_window(utc_start, utc_end, max_files=4, tail_buffer_hours=3):
+def select_iem_files_for_window(utc_start, utc_end, max_files=4, tail_buffer_minutes=20):
     """Find MRMS MESH files on the IEM archive covering the local day (full-day max).
 
     IEM mirrors NCEP MRMS at:
@@ -408,7 +416,7 @@ def select_iem_files_for_window(utc_start, utc_end, max_files=4, tail_buffer_hou
     """
     import requests
     candidate_days = sorted({utc_start.date(), utc_end.date(),
-                             (utc_end + dt.timedelta(hours=tail_buffer_hours)).date()})
+                             (utc_end + dt.timedelta(minutes=tail_buffer_minutes)).date()})
     stamped = []
     for d in candidate_days:
         folder = f"{IEM_BASE}/{d:%Y/%m/%d}/mrms/ncep/MESH_Max_1440min/"
@@ -423,7 +431,7 @@ def select_iem_files_for_window(utc_start, utc_end, max_files=4, tail_buffer_hou
     if not stamped:
         return []
     stamped.sort(key=lambda kt: kt[1])
-    window_hi = utc_end + dt.timedelta(hours=tail_buffer_hours)
+    window_hi = utc_end + dt.timedelta(minutes=tail_buffer_minutes)
     after = [kt for kt in stamped if utc_end <= kt[1] <= window_hi]
     chosen = after or [kt for kt in stamped if utc_start <= kt[1] <= utc_end][-max_files:] or stamped[-max_files:]
     if len(chosen) > max_files:
@@ -708,7 +716,9 @@ def fetch_rqi_at_point(utc_start, utc_end, lat, lon, tmpdir, max_files=None,
 #  ours, not NOAA's, and are deliberately conservative: we would rather say
 #  "quality fair, treat with care" than imply a clean look the radar never had.
 RQI_GRADES = (
-    (0.80, "Excellent", "Clean radar view of this location."),
+    (0.80, "Excellent", "Best RQI sample this local day shows a clean radar view "
+                        "of this location. RQI is a coverage/blockage index, not a "
+                        "hail-quality score."),
     (0.50, "Good", "Usable radar view of this location."),
     (0.20, "Fair", "Degraded radar view \u2014 partial beam blockage or long range."),
     (0.01, "Poor", "Severely degraded radar view \u2014 terrain blockage or extreme range."),
@@ -735,9 +745,13 @@ def grade_rqi(value):
 
 #  Fraction of cells inside COVERAGE_RADIUS_MI that must carry valid radar data
 #  before we are willing to state a hail size at all. Tunable via env.
+#  DIAGNOSTICS ONLY (v2.6, Ticket 9): these fractions do NOT drive the
+#  coverage state any more — RQI does (assess_coverage). They remain solely for
+#  the cell-count diagnostic. Do not wire MESH-sparsity back into coverage:
+#  a sparse MESH grid means "no hail diagnosed", not "no radar coverage".
 COVERAGE_RADIUS_MI = 5.0
-COVERAGE_OK_FRAC = 0.80      # >= this -> "ok"
-COVERAGE_MIN_FRAC = 0.50     # >= this -> "partial";  below -> "none"
+COVERAGE_OK_FRAC = 0.80      # diagnostics only
+COVERAGE_MIN_FRAC = 0.50     # diagnostics only
 
 
 def assess_coverage(rqi_grade: dict | None = None, hail_cells: int = 0,
@@ -814,12 +828,18 @@ MESH_DISCLOSURE = (
     "not a stone measured at this address.")
 
 
-def classify_hail(peak_in, cell_in, threshold_in, coverage_state="ok"):
+def classify_hail(peak_in, threshold_in, coverage_state="ok"):
     """Turn the sampled numbers into the report's verdict, badge and theme.
 
-    `peak_in` is the peak within 1/2 mile; `cell_in` is the nearest grid cell.
-    Either may be None (no valid radar data). Returns a dict consumed directly
-    by the PDF template.
+    `peak_in` is the peak within 1/2 mile (the classification figure). May be
+    None (no valid radar data). Returns a dict consumed directly by the PDF
+    template.
+
+    v2.6 (Ticket 2): the science anchors (0.50\u2033 discrimination floor,
+    1.14\u2033 severe proxy, 2.00\u2033 significant) are SCIENCE and stay fixed;
+    the client's damage threshold (`threshold_in`) is a REPORT SETTING and every
+    sentence that mentions "the threshold" must use it. `detected` and the badge
+    must never contradict each other for a non-default threshold.
     """
     thr = f"{threshold_in:.2f}\u2033"
 
@@ -858,13 +878,19 @@ def classify_hail(peak_in, cell_in, threshold_in, coverage_state="ok"):
                   "distinguish hail from ordinary convection. The figure is "
                   "reported for completeness, not as verified hail.")
         likelihood = "Unlikely"
-    elif peak_in < 0.75:
+    elif not detected:
+        # 0.50\u2033 <= peak < the report's threshold. The copy names THIS report's
+        # threshold — never a hardcoded 0.75\u2033 (Ticket 2).
         band, theme = "indicated", "caution"
         badge = "Hail Indicated"
-        verdict = ("Small hail is INDICATED near this property, below the "
-                   "0.75\u2033 threshold commonly used for roof damage.")
+        verdict = (f"Small hail is INDICATED near this property, below the "
+                   f"{thr} damage threshold used for this report.")
         detail = ("Hail at this size is generally not associated with functional "
-                  "damage to conventional roofing, but is not zero.")
+                  "damage to conventional roofing, but is not zero."
+                  + ((" Note: this value meets the common 0.75\u2033 roof-damage "
+                      "benchmark; it is reported as below threshold only because "
+                      f"this report was ordered with a {thr} threshold.")
+                     if peak_in >= 0.75 and threshold_in > 0.75 else ""))
         likelihood = "Possible \u2014 sub-threshold"
     elif peak_in < MESH_SEVERE_PROXY_IN:
         band, theme = "threshold", "detected"
@@ -1028,7 +1054,7 @@ def fetch_storm_reports(lat, lon, utc_start, utc_end, date_of_loss, radius_miles
         pad = 0.6  # ~40 miles, comfortably larger than the search radius
         params = {
             "sts": utc_start.strftime("%Y-%m-%dT%H:%MZ"),
-            "ets": (utc_end + dt.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%MZ"),
+            "ets": utc_end.strftime("%Y-%m-%dT%H:%MZ"),   # one clock: the local day (D3)
             "west": lon - pad, "east": lon + pad,
             "south": lat - pad, "north": lat + pad,
         }
@@ -1677,13 +1703,16 @@ def build_context_page(data: dict) -> str:
         w_pill = '<span class="pill" style="background:#d94f3d;">Warned</span>'
         w_big = f'{len(warn["warnings"])} severe warning(s)'
         w_sub = "; ".join(names) + extra + (
-            f' &mdash; issued by NWS {warn["warnings"][0]["wfo"]}.')
+            f' &mdash; issued by NWS {warn["warnings"][0]["wfo"]}.'
+            + (" End times were unavailable for some warnings; a standard "
+               "duration was assumed." if any(x.get("expire_assumed")
+                                              for x in warn["warnings"][:3]) else ""))
     else:
         n_watch = len(warn.get("watches") or [])
         w_pill = '<span class="pill" style="background:#28a678;">Not warned</span>'
         w_big = "No severe warning"
-        w_sub = ("No severe thunderstorm or tornado warning covered this property "
-                 "on the date of loss."
+        w_sub = ("No severe thunderstorm or tornado warning was in effect at this "
+                 "property during the local date of loss."
                  + (f" A watch was in effect ({n_watch})." if n_watch else ""))
 
     # ---- same-day: measured wind ----------------------------------------
@@ -1814,7 +1843,7 @@ def build_context_page(data: dict) -> str:
         <div class="seclbl">Date of Loss &mdash; Independent Context</div>
         <div class="ctx">
           <div class="card">
-            <div class="lbl">NWS Warnings at This Property</div>
+            <div class="lbl">NWS Warnings in Effect at This Property</div>
             <div class="big">{w_big}</div>
             <div style="margin-top:7px;">{w_pill}</div>
             <div class="sub">{w_sub}</div>
@@ -1905,6 +1934,9 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
              ("Peak within 1 mile", res["mile1"], False),
              ("Peak within 3 miles", res["mile3"], False),
              ("Peak within 5 miles", res["mile5"], False)]
+    # Adjacent days (D3): shown for timing context, never part of the finding.
+    for _adj in (data.get("adjacentDays") or []):
+        _rows.append((f'{_adj["label"]} \u2014 peak \u00bd mi', _adj.get("half") or {}, False))
     est_rows = "".join(
         '<tr class="{c}"><td>{l}</td><td class="num">{i}</td><td class="num">{m}</td></tr>'.format(
             c="hot" if hot else "", l=label,
@@ -1921,7 +1953,9 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
             "Each row is the PEAK radar-estimated diameter within that radius \u2014 not an "
             "average, and not a measurement at the address. The MRMS grid is &asymp;1 km, so "
             "&lsquo;nearest grid cell&rsquo; already covers roughly a city block. A larger "
-            "radius can only ever report the same value or a bigger one.")
+            "radius can only ever report the same value or a bigger one."
+            + (" Adjacent-day rows are timing context only and are NOT part of this "
+               "report&rsquo;s finding." if data.get("adjacentDays") else ""))
 
     # ---- Confidence chip: suppressed entirely when coverage is unusable ---
     _conf_level = data.get("confidenceLevel") or ""
@@ -1943,9 +1977,10 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
         "Maximum Estimated Size of Hail (MESH) product &mdash; a single-polarisation radar "
         "algorithm that infers in-storm hail growth from reflectivity above a modelled "
         "freezing level. This report reads the 24-hour maximum field (MESH_Max_1440min) "
-        "covering the property&rsquo;s local calendar day. It is a rolling 24-hour "
-        "maximum sampled up to three hours past local midnight, so hail in the early "
-        "hours of the next morning can contribute. Radar coverage quality is NOAA&rsquo;s "
+        "stamped at the end of the property&rsquo;s local calendar day (within minutes of "
+        "local midnight), so its window matches that day; adjacent days are sampled "
+        "separately and are never folded into this report&rsquo;s finding. Ground reports "
+        "are clipped to the same local-day window. Radar coverage quality is NOAA&rsquo;s "
         "Radar Quality Index (0&ndash;1, from terrain-blockage maps and beam height) &mdash; "
         "an indicator of whether the radar could see this point, not a hail-specific score.")
     methodology = data.get("methodologyText", _method_default)

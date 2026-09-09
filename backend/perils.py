@@ -19,8 +19,8 @@ import snow_core as sc
 
 PERILS = ("hail", "wind", "snow")
 
-#  Shared with pipeline.py so all three perils stamp the same methodology version.
-METHODOLOGY_VERSION = "v2.5"
+#  Single source of truth for the methodology version lives in pipeline.py
+#  (Ticket 7) — wind/snow footers call pipeline.version_line().
 _GEOCODE_LABEL = {"rooftop": "Rooftop", "interpolated": "Address range",
                   "street": "Street centreline", "area": "Area centroid",
                   "manual": "Manual coordinates", "unknown": "Unspecified"}
@@ -48,6 +48,9 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
         cls = r.get("classification") or {}
         cov = r.get("coverage") or {}
         cell_in, half_in = r.get("cell_in"), r.get("half_in")
+        _adj = {}
+        for _a in (r.get("adjacent_days") or []):
+            _adj[-1 if "before" in _a.get("label", "") else 1] = (_a.get("half") or {}).get("in")
 
         def _r2(v):
             return round(v, 2) if v is not None else None
@@ -73,8 +76,8 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
             "likelihood": cls.get("likelihood"),
             "metrics": {"cell_in": _r2(cell_in),
                         "half_mile_in": _r2(half_in),
-                        # kept for backward compatibility with stored reports
-                        "at_property_in": _r2(half_in),
+                        "prev_day_half_in": _r2(_adj.get(-1)),
+                        "next_day_half_in": _r2(_adj.get(1)),
                         "mile1_in": _r2(rings[1]["in"]),
                         "mile3_in": _r2(rings[3]["in"]),
                         "mile5_in": _r2(rings[5]["in"])},
@@ -103,7 +106,7 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
             claim_ref=claim_ref, threshold_mph=thr, station_gusts=stations,
             reports=reports, map_data_uri=hc.png_to_data_uri(mp))
         data["geocodeQuality"] = _gp
-        data["versionLine"] = f"methodology {METHODOLOGY_VERSION}"
+        data["versionLine"] = pipeline.version_line()
         data["generatedUtc"] = f"{dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M UTC}"
         pdf = os.path.join(out_dir, f"Clear_Claims_Wind_Report_{rid}.pdf")
         wc.render(data, pdf, font_dir=fd)
@@ -180,7 +183,7 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
         claim_ref=claim_ref, threshold_in=thr, depth_mm=depth_mm, swe_mm=swe_mm,
         station_reports=stations, map_data_uri=hc.png_to_data_uri(mp))
     data["geocodeQuality"] = _GEOCODE_LABEL.get(loc.get("precision", "unknown"), "Unspecified")
-    data["versionLine"] = f"methodology {METHODOLOGY_VERSION}"
+    data["versionLine"] = pipeline.version_line()
     data["generatedUtc"] = f"{dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M UTC}"
     pdf = os.path.join(out_dir, f"Clear_Claims_Snow_Report_{rid}.pdf")
     sc.render(data, pdf, font_dir=fd)
@@ -188,8 +191,11 @@ def run_peril(peril, *, address, date_of_loss, manual_lat=None, manual_lon=None,
         "peril": "snow", "pdf_path": pdf, "report_id": rid,
         "detected": data["_detected"], "confidence": data["_confidence"],
         "data_source": "NOAA SNODAS + NWS station reports", "n_reports": len(stations),
-        "headline": (f'Modelled depth {data["_depth_in"]:.1f}" on ground '
-                     f'· load {data["_load_psf"]:.0f} psf'),
+        "headline": ("Snow analysis unavailable at this location on this date"
+                     if data["_depth_in"] is None else
+                     (f'Modelled depth {data["_depth_in"]:.1f}" on ground '
+                      f'· load {data["_load_psf"]:.0f} psf')),
+        "coverage": ("none" if data["_depth_in"] is None else None),
         "badge": data.get("statusText"),
         "radar_quality": data.get("measurementQuality"),
         "geocode_precision": loc.get("precision"),

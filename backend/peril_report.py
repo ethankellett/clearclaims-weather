@@ -36,8 +36,13 @@ def build_report_html_generic(data: dict, font_dir: str | None = None) -> str:
       findingHtml, findingSubHtml, statusText, flag (bool: alert vs clear).
     """
     flag = bool(data["flag"])
-    t = hc._THEME_DETECTED if flag else hc._THEME_CLEAR
-    icon = hc._ICON_TRIANGLE if flag else hc._ICON_CHECK
+    # v2.6: a peril can name its theme ("caution"/"unknown" for reported-only or
+    # unavailable states) instead of the old red/green binary.
+    _tk = data.get("theme")
+    t = hc._THEMES.get(_tk) if _tk else None
+    if t is None:
+        t = hc._THEME_DETECTED if flag else hc._THEME_CLEAR
+    icon = hc._ICON_TRIANGLE if (flag or _tk in ("caution", "unknown")) else hc._ICON_CHECK
     font_face = hc._font_face_css(font_dir)
 
     # map block (real image, else neutral placeholder)

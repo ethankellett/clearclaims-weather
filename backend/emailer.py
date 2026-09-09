@@ -43,8 +43,12 @@ def email_verdict(meta: dict):
 
     if peril == "hail" and coverage == "none":
         return "Radar Coverage Unavailable", "#5a6b7e"
+    if peril == "snow" and (badge == "Analysis Unavailable" or coverage == "none"):
+        return "Snow Analysis Unavailable", "#5a6b7e"
     if badge:
-        color = {"Coverage Unavailable": "#5a6b7e"}.get(badge)
+        color = {"Coverage Unavailable": "#5a6b7e",
+                 "Analysis Unavailable": "#5a6b7e",
+                 "Reported Nearby — Not Measured": "#e6a117"}.get(badge)
         if color is None:
             color = "#d94f3d" if detected else (
                 "#e6a117" if badge in ("Trace / Indeterminate", "Hail Indicated")
@@ -137,7 +141,8 @@ def _send_smtp(to, subject, html, pdf_bytes, filename):
     if EMAIL_REPLY_TO:
         msg["Reply-To"] = EMAIL_REPLY_TO
     msg["Subject"] = subject
-    msg.set_content("Your hail report is ready. Open the link in an HTML-capable client.")
+    # Peril-aware (Ticket 8): the subject already carries the peril + verdict.
+    msg.set_content(f"{subject}. Open the link in an HTML-capable client.")
     msg.add_alternative(html, subtype="html")
     if pdf_bytes:
         msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=filename)

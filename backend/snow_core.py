@@ -347,11 +347,26 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
                            contact_url, contact_city, claim_ref, threshold_in,
                            depth_mm, swe_mm, station_reports, map_data_uri, generated=None):
     generated = generated or dt.datetime.now(dt.timezone.utc)
-    depth_in = (depth_mm / MM_PER_IN) if depth_mm and not np.isnan(depth_mm) else 0.0
-    swe_in = (swe_mm / MM_PER_IN) if swe_mm and not np.isnan(swe_mm) else 0.0
-    load_psf = swe_to_load_psf(swe_mm)
-    detected = depth_in >= threshold_in
-    conf = assess_snow_confidence(depth_in, station_reports, threshold_in)
+
+    # v2.6 (Ticket 5): a SNODAS "nodata" cell (−9999 → NaN) is a DATA GAP, not
+    # a measured zero. The old code coerced it to 0.0 and printed a green
+    # "Below Threshold" — the hail D1 defect in another peril. A valid finite
+    # 0.0 is still a real zero and is treated normally.
+    def _valid(v):
+        return v is not None and not (isinstance(v, float) and np.isnan(v))
+    depth_missing = not _valid(depth_mm)
+    depth_in = (depth_mm / MM_PER_IN) if not depth_missing else None
+    swe_in = (swe_mm / MM_PER_IN) if _valid(swe_mm) else None
+    load_psf = swe_to_load_psf(swe_mm) if _valid(swe_mm) else None
+    detected = (depth_in >= threshold_in) if depth_in is not None else None
+    if depth_missing:
+        _near = min((r["dist_mi"] for r in station_reports), default=None)
+        conf = {"level": None, "color": "#5a6b7e",
+                "note": ("No confidence level is stated because the snow model has "
+                         "no valid value at this point on this date."),
+                "quality": grade_snow_station(_near)}
+    else:
+        conf = assess_snow_confidence(depth_in, station_reports, threshold_in)
 
     ns = "N" if lat >= 0 else "S"; ew = "E" if lon >= 0 else "W"
     coord = f"{abs(lat):.4f}° {ns}, {abs(lon):.4f}° {ew}"
@@ -362,9 +377,14 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
     _with_depth = [r for r in station_reports if r.get("depth_in") is not None]
     st_depth = _with_depth[0] if _with_depth else None
     rows = [
-        {"label": "Snow depth on ground (modelled)", "c1": f"{depth_in:.1f}", "c2": f"{depth_mm:.0f}" if depth_mm and not np.isnan(depth_mm) else "—", "highlight": True},
-        {"label": "Snow-water-equiv (SWE)", "c1": f"{swe_in:.2f}", "c2": f"{swe_mm:.0f}" if swe_mm and not np.isnan(swe_mm) else "—"},
-        {"label": "Roof load (from SWE)", "c1": f"{load_psf:.1f}", "c2": "psf"},
+        {"label": "Snow depth on ground (modelled)",
+         "c1": f"{depth_in:.1f}" if depth_in is not None else "—",
+         "c2": f"{depth_mm:.0f}" if not depth_missing else "—", "highlight": True},
+        {"label": "Snow-water-equiv (SWE)",
+         "c1": f"{swe_in:.2f}" if swe_in is not None else "—",
+         "c2": f"{swe_mm:.0f}" if _valid(swe_mm) else "—"},
+        {"label": "Roof load (from SWE)",
+         "c1": f"{load_psf:.1f}" if load_psf is not None else "—", "c2": "psf"},
         {"label": "Measured depth, NWS station",
          "c1": f"{st_depth['depth_in']:.0f}" if st_depth else "—",
          "c2": f"{st_depth['dist_mi']:.1f} mi" if st_depth else "—"},
@@ -373,20 +393,29 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
          "c2": f"{_with_snow[0]['dist_mi']:.1f} mi" if _with_snow else "—"},
     ]
 
-    dk = (hc._THEME_DETECTED if detected else hc._THEME_CLEAR)["dark"]
+    _theme = "detected" if detected else ("unknown" if detected is None else "clear")
+    dk = hc._THEMES[_theme]["dark"]
     # IMPORTANT: SNODAS depth is snow ON THE GROUND, which includes older
     # snowpack. It is the right measure for a roof-load or collapse question and
     # the WRONG measure for "did it snow on this date". The previous wording said
     # "significant snow accumulation was present", which reads as though it fell
     # that day. New snowfall is reported separately, from the station.
-    finding = (f'Snow load of ≥ {thr} depth <span style="color:{dk};">'
-               f'{"was present on this property" if detected else "was not present on this property"}'
-               f'</span> on the date of loss.')
-    sub = (f'Snow depth ON THE GROUND at the property was '
-           f'<strong style="color:#06101f;">{depth_in:.1f}″</strong> '
-           f'(roof load ≈ <strong style="color:#06101f;">{load_psf:.0f} psf</strong>), '
-           f'{"at or above" if detected else "below"} the {thr} threshold. Depth includes '
-           f'any older snowpack; measured station values are in the table below.')
+    if detected is None:
+        finding = (f'Snow analysis is <span style="color:{dk};">unavailable at this '
+                   f'location</span> for this date.')
+        sub = ("NOAA's SNODAS model has no valid value at this point on this date. "
+               "This is an absence of data, not evidence that snow was absent. Any "
+               "official station measurements appear in the table below.")
+    else:
+        finding = (f'Snow load of ≥ {thr} depth <span style="color:{dk};">'
+                   f'{"was present on this property" if detected else "was not present on this property"}'
+                   f'</span> on the date of loss.')
+        sub = (f'Snow depth ON THE GROUND at the property was '
+               f'<strong style="color:#06101f;">{depth_in:.1f}″</strong> '
+               + (f'(roof load ≈ <strong style="color:#06101f;">{load_psf:.0f} psf</strong>), '
+                  if load_psf is not None else '')
+               + f'{"at or above" if detected else "below"} the {thr} threshold. Depth includes '
+               f'any older snowpack; measured station values are in the table below.')
 
     return {
         "reportId": report_id, "dateGenerated": f"{generated:%B %d, %Y}",
@@ -394,8 +423,11 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
         "claimRef": claim_ref or "—", "coordinates": coord,
         "contactUrl": contact_url, "contactCity": contact_city,
         "bandLabel": "Snow Analysis", "reportTitle": "Snow Verification Report",
-        "flag": detected,
-        "statusText": "Load Present" if detected else "Below Threshold",
+        "flag": bool(detected),
+        "theme": _theme,
+        "statusText": ("Load Present" if detected else
+                       "Analysis Unavailable" if detected is None
+                       else "Below Threshold"),
         "measurementQuality": (
             f'{conf["quality"]["grade"]}'
             + (f' ({conf["quality"]["dist_mi"]:.0f} mi)'
@@ -430,7 +462,8 @@ def build_snow_report_data(*, report_id, address_label, lat, lon, date_of_loss,
             "warranty and accepts no liability arising from use of this report. Source data "
             "is U.S. NOAA public-domain. Clear Claims Co. is an independent provider and is "
             "<strong style=\"color:#5a6b7e;\">not affiliated with Cotality or CoreLogic</strong>."),
-        "_detected": detected, "_depth_in": round(depth_in, 1),
+        "_detected": detected,
+        "_depth_in": (round(depth_in, 1) if depth_in is not None else None),
         "_load_psf": load_psf, "_confidence": conf,
         "_new_snow_in": nearest_snow, "_quality": conf["quality"],
         "_station_depth_in": (st_depth or {}).get("depth_in"),

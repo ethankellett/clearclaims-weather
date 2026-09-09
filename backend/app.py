@@ -198,7 +198,9 @@ def _run(req: GenerateRequest, user: str = "") -> dict:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "storage": "s3" if storage.using_s3() else "local"}
+    return {"status": "ok",
+            "storage": ("s3" if storage.using_s3()
+                        else "ephemeral" if storage.is_ephemeral() else "local")}
 
 
 @app.post("/generate")

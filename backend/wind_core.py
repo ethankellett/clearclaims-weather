@@ -188,9 +188,15 @@ def parse_lsr_wind(obj: dict, lat, lon, radius_miles):
     return out
 
 
-def parse_spc_wind_csv(text: str, lat, lon, radius_miles):
+def parse_spc_wind_csv(text: str, lat, lon, radius_miles,
+                       convective_day=None, utc_start=None, utc_end=None):
     """SPC daily wind CSV: Time,Speed,Location,County,State,Lat,Lon,Comments.
-    Speed is mph (measured) or 'UNK' (estimated/ gust from damage)."""
+    Speed is mph (measured) or 'UNK' (estimated/ gust from damage).
+
+    v2.6 (Ticket 4): SPC "daily" files run 12Z–12Z (convective day) — the same
+    clock defect the hail report fixed. When `convective_day` is given, each
+    row's time is resolved onto the correct calendar day via
+    hail_core.spc_row_time_utc and clipped to the local-day window."""
     import csv
     import io
     out = []
@@ -205,10 +211,16 @@ def parse_spc_wind_csv(text: str, lat, lon, radius_miles):
         except ValueError:
             spd = None     # 'UNK' = estimated/damage report
         d = float(hc.haversine_miles(lat, lon, rlat, rlon))
-        if d <= radius_miles:
-            out.append({"source": "SPC", "speed_mph": spd, "lat": rlat, "lon": rlon,
-                        "dist_mi": d, "dir": hc.compass_bearing(lat, lon, rlat, rlon),
-                        "time": row.get("Time", ""), "kind": row.get("Location", "")})
+        if d > radius_miles:
+            continue
+        t = hc.spc_row_time_utc(row.get("Time", ""), convective_day) if convective_day else None
+        if t is not None and utc_start is not None and utc_end is not None:
+            if not (utc_start <= t <= utc_end):
+                continue
+        out.append({"source": "SPC", "speed_mph": spd, "lat": rlat, "lon": rlon,
+                    "dist_mi": d, "dir": hc.compass_bearing(lat, lon, rlat, rlon),
+                    "time": (t.strftime("%Y-%m-%dT%H:%MZ") if t else row.get("Time", "")),
+                    "kind": row.get("Location", "")})
     return out
 
 
@@ -219,22 +231,34 @@ def fetch_wind_reports(lat, lon, utc_start, utc_end, date_of_loss, radius_miles=
     try:
         pad = 0.6
         params = {"sts": utc_start.strftime("%Y-%m-%dT%H:%MZ"),
-                  "ets": (utc_end + dt.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%MZ"),
+                  "ets": utc_end.strftime("%Y-%m-%dT%H:%MZ"),   # one clock (D3)
                   "west": lon - pad, "east": lon + pad, "south": lat - pad, "north": lat + pad}
         r = requests.get("https://mesonet.agron.iastate.edu/geojson/lsr.geojson",
                          params=params, timeout=30)
         reports += parse_lsr_wind(r.json(), lat, lon, radius_miles)
     except Exception:
         pass
-    try:
-        url = f"https://www.spc.noaa.gov/climo/reports/{date_of_loss:%y%m%d}_rpts_wind.csv"
-        r = requests.get(url, timeout=30)
-        if r.status_code == 200 and "Lat" in r.text[:200]:
-            reports += parse_spc_wind_csv(r.text, lat, lon, radius_miles)
-    except Exception:
-        pass
-    reports.sort(key=lambda x: x["dist_mi"])
-    return reports
+    # SPC files are 12Z–12Z: an early-morning gust on the date of loss lives in
+    # the PREVIOUS day's file. Fetch both, resolve row times, clip to the window
+    # (Ticket 4 — same fix the hail report already carries).
+    for d in (date_of_loss - dt.timedelta(days=1), date_of_loss):
+        try:
+            url = f"https://www.spc.noaa.gov/climo/reports/{d:%y%m%d}_rpts_wind.csv"
+            r = requests.get(url, timeout=30)
+            if r.status_code == 200 and "Lat" in r.text[:200]:
+                reports += parse_spc_wind_csv(r.text, lat, lon, radius_miles,
+                                              convective_day=d,
+                                              utc_start=utc_start, utc_end=utc_end)
+        except Exception:
+            continue
+    # De-duplicate near-identical reports (same rounded spot + speed).
+    seen, deduped = set(), []
+    for rep_ in sorted(reports, key=lambda x: x["dist_mi"]):
+        key = (round(rep_["lat"], 2), round(rep_["lon"], 2),
+               round(rep_.get("speed_mph") or 0))
+        if key not in seen:
+            seen.add(key); deduped.append(rep_)
+    return deduped
 
 
 # ---- confidence + map -----------------------------------------------------
@@ -379,9 +403,12 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
     rep_speeds = [r["speed_mph"] for r in reports if r.get("speed_mph") is not None]
     reported_peak = max(rep_speeds) if rep_speeds else None
 
-    peak = max([v for v in (measured_peak, reported_peak) if v is not None],
-               default=None)
-    detected = peak is not None and peak >= threshold_mph
+    # v2.6 (Ticket 4): the status/verdict turns ONLY on measured instrument
+    # readings. A spotter's estimate can be surfaced, labeled, but can never
+    # flip the report to "Detected".
+    detected = measured_peak is not None and measured_peak >= threshold_mph
+    reported_exceeds = (not detected and reported_peak is not None
+                        and reported_peak >= threshold_mph)
     conf = assess_wind_confidence(measured_peak, len(station_gusts), reports,
                                   threshold_mph, nearest_dist_mi=nearest_dist)
     quality = conf["quality"]
@@ -389,7 +416,6 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
     ns = "N" if lat >= 0 else "S"; ew = "E" if lon >= 0 else "W"
     coord = f"{abs(lat):.4f}° {ns}, {abs(lon):.4f}° {ew}"
     thr = f"{threshold_mph:.0f} mph"
-    peak_txt = f"{peak:.0f} mph" if peak is not None else "no measurement"
 
     # Measured and reported are visually separated so nobody can read a spotter's
     # estimate fifteen miles away as this property's gust.
@@ -411,7 +437,9 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
                      "c1": f"{big['speed_mph']:.0f}" if big.get("speed_mph") else "est.",
                      "c2": f"{big['dist_mi']:.1f} mi"})
 
-    _dk = (hc._THEME_DETECTED if detected else hc._THEME_CLEAR)["dark"]
+    _theme = ("detected" if detected else
+              "caution" if reported_exceeds else "clear")
+    _dk = hc._THEMES[_theme]["dark"]
     if measured_peak is None and reported_peak is None:
         finding = (f'No wind measurement was available <span style="color:{_dk};">'
                    f'near this property</span> on this date.')
@@ -419,9 +447,15 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
                'nearby. This report can neither confirm nor rule out damaging wind '
                'at the property.')
     else:
-        finding = (f'Damaging wind (≥ {thr}) <span style="color:{_dk};">'
-                   f'{"was recorded" if detected else "was not recorded"}</span> '
-                   f'near this property.')
+        if reported_exceeds:
+            # A spotter/report exceeds the threshold but no instrument did: say
+            # exactly that — never "was recorded near this property" (Ticket 4).
+            finding = (f'Damaging wind (≥ {thr}) was <span style="color:{_dk};">'
+                       f'reported nearby, but not measured</span> at an official station.')
+        else:
+            finding = (f'Damaging wind (≥ {thr}) <span style="color:{_dk};">'
+                       f'{"was recorded" if detected else "was not recorded"}</span> '
+                       f'at an official station near this property.')
         bits = []
         if nearest is not None:
             bits.append(
@@ -447,7 +481,11 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
         "claimRef": claim_ref or "—", "coordinates": coord,
         "contactUrl": contact_url, "contactCity": contact_city,
         "bandLabel": "Wind Analysis", "reportTitle": "Wind Verification Report",
-        "flag": detected, "statusText": "Detected" if detected else "Not Detected",
+        "flag": detected,
+        "theme": _theme,
+        "statusText": ("Detected" if detected else
+                       "Reported Nearby — Not Measured" if reported_exceeds
+                       else "Not Detected"),
         "findingHtml": finding, "findingSubHtml": sub,
         "resultsTitle": "Peak Wind Gust", "colHeaders": {"label": "Source", "c1": "mph", "c2": "distance"},
         "rows": rows,
@@ -476,7 +514,8 @@ def build_wind_report_data(*, report_id, address_label, lat, lon, date_of_loss,
             "of this report. Source data is U.S. NOAA public-domain observations. "
             "Clear Claims Co. is an independent provider and is <strong style=\"color:#5a6b7e;\">"
             "not affiliated with Cotality or CoreLogic</strong>."),
-        "_detected": detected, "_peak_mph": peak, "_confidence": conf,
+        "_detected": detected, "_peak_mph": measured_peak, "_confidence": conf,
+        "_reported_exceeds": reported_exceeds,
         "_measured_peak_mph": measured_peak, "_reported_peak_mph": reported_peak,
         "_nearest_dist_mi": nearest_dist, "_quality": quality,
         "_nearest_mph": (nearest or {}).get("gust_mph"),

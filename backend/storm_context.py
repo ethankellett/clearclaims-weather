@@ -171,6 +171,11 @@ def fetch_prior_hail(lat, lon, date_of_loss, months=PRIOR_MONTHS,
 #  T0-14  NWS WARNINGS IN FORCE AT THE PROPERTY THAT DAY
 # -----------------------------------------------------------------------------
 
+def event_overlaps(issued, expire, utc_start, utc_end) -> bool:
+    """True when [issued, expire] overlaps [utc_start, utc_end] (Ticket 6)."""
+    return issued <= utc_end and expire >= utc_start
+
+
 def fetch_nws_warnings(lat, lon, utc_start, utc_end, timeout=20):
     """Severe-thunderstorm / tornado warnings and watches covering the point.
 
@@ -201,10 +206,28 @@ def fetch_nws_warnings(lat, lon, utc_start, utc_end, timeout=20):
                 (e.get("issue") or "").replace("Z", "+00:00"))
         except Exception:
             continue
-        if not (utc_start <= issued <= utc_end):
+        # v2.6 (Ticket 6): keep an event if its ACTIVE window overlaps the local
+        # day — not only if it was issued inside it. A warning issued the evening
+        # before, still in force after local midnight, covered this property.
+        expire, assumed = None, False
+        for _k in ("expire", "expired", "ends", "end"):
+            _v = e.get(_k)
+            if _v:
+                try:
+                    expire = dt.datetime.fromisoformat(str(_v).replace("Z", "+00:00"))
+                    break
+                except Exception:
+                    pass
+        if expire is None:
+            # Documented assumption when the payload lacks an end time:
+            # 60 min for a warning, 4 h for a watch (typical NWS durations).
+            expire = issued + dt.timedelta(minutes=60 if sig == "W" else 240)
+            assumed = True
+        if not event_overlaps(issued, expire, utc_start, utc_end):
             continue
         rec = {"name": e.get("name") or e.get("ph_name") or "",
-               "issued": issued, "wfo": e.get("wfo", ""), "ugc": e.get("ugc", "")}
+               "issued": issued, "expire": expire, "expire_assumed": assumed,
+               "wfo": e.get("wfo", ""), "ugc": e.get("ugc", "")}
         if sig == "W":
             out["warnings"].append(rec)
         elif sig == "A":

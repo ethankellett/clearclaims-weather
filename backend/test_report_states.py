@@ -155,7 +155,7 @@ print("\n=== 1b. GENUINE no-coverage state still renders correctly ===")
 # Reached when a future coverage source (MRMS RQI, PR 2) reports a real gap.
 cov = hc.assess_coverage(hc.grade_rqi(0.0))
 check("RQI 0.0 -> coverage state 'none'", cov["state"] == "none", cov["state"])
-cls = hc.classify_hail(None, None, 0.75, coverage_state="none")
+cls = hc.classify_hail(None, 0.75, coverage_state="none")
 check("band = no_coverage", cls["band"] == "no_coverage")
 check("detected is None, not False", cls["detected"] is None)
 check("verdict states coverage unavailable",
@@ -632,6 +632,95 @@ html = em.build_email_html({"peril": "wind", "detected": True, "badge": "Detecte
                             "confidence": "High"}, "https://x/r/1")
 check("email body carries the honest headline", "Measured 63 mph at FSD" in html)
 check("email body has no None fields", "None" not in html)
+
+
+print("\n=== 11. v2.6 T2: CUSTOM THRESHOLD CANNOT CONTRADICT ITSELF ===")
+r = run("thr100", blob(0.90), thr=1.00)
+t = pdf_text(r["pdf_path"])
+check("thr=1.00 peak=0.90 -> detected False", r["classification"]["detected"] is False)
+check("badge is NOT at-or-above-threshold",
+      r["classification"]["badge"] != "At or Above Threshold",
+      r["classification"]["badge"])
+check("copy names the 1.00 threshold", "1.00" in r["classification"]["verdict"],
+      r["classification"]["verdict"])
+check("copy does NOT claim below-0.75", "below the 0.75" not in t)
+r = run("thr050", blob(0.60), thr=0.50)
+t = pdf_text(r["pdf_path"])
+check("thr=0.50 peak=0.60 -> detected True", r["classification"]["detected"] is True)
+check("no 'below the 0.75' at thr 0.50", "below the 0.75" not in t)
+check("verdict names 0.50 threshold", "0.50" in r["classification"]["verdict"],
+      r["classification"]["verdict"])
+
+print("\n=== 12. v2.6 T1: ADJACENT DAYS SHOWN, NEVER HEADLINED ===")
+# DOL grid shows nothing; the day AFTER carries 1.75". The 1.75 must appear only
+# as a labeled adjacent-day row — never in the finding or the DOL rows.
+adj = {"rows": [
+    {"label": "Day before (Jun 02)", "date": "2024-06-02",
+     "cell": {"in": None, "mm": None}, "half": {"in": None, "mm": None}},
+    {"label": "Day after (Jun 04)", "date": "2024-06-04",
+     "cell": {"in": 1.62, "mm": 41.0}, "half": {"in": 1.75, "mm": 44.0}},
+]}
+g = make_grib(blob(0), os.path.join(TMP, "adj.grib2"))
+outd = os.path.join(TMP, "adj"); os.makedirs(outd, exist_ok=True)
+r = pipeline.generate_report(address="1234 Mount Rushmore Rd, Rapid City, SD 57701",
+                             manual_lat=CY, manual_lon=CX, date_of_loss=DOL,
+                             threshold_in=0.75, out_dir=outd, _grib_paths=[g],
+                             _adjacent=adj,
+                             _rqi={"value": 0.92, "n_files": 2, "source": "test"},
+                             _context={})
+t = pdf_text(r["pdf_path"])
+check("DOL verdict stays none-detected", r["classification"]["badge"] == "None Detected")
+check("detected is False, not flipped by adjacent day", r["detected"] is False)
+check("adjacent-day 1.75 IS printed", "1.75" in t)
+check("adjacent row is labeled with its date", "Day after (Jun 04)" in t)
+check("caption says context-only", "timing" in t and "NOT part of this report" in t)
+check("finding does not carry 1.75",
+      "1.75" not in r["classification"]["verdict"] + r["classification"]["detail"])
+import subprocess as _sp
+_n = _sp.run(["pdfinfo", r["pdf_path"]], capture_output=True, text=True).stdout
+_pages = [l for l in _n.splitlines() if l.startswith("Pages:")]
+check("still two pages with adjacent rows", "2" in (_pages[0] if _pages else ""),
+      _pages[0] if _pages else "?")
+# Reverse case: hail ON the DOL, quiet next morning -> headline keeps the DOL value.
+r = run("dolhail", blob(1.40))
+check("DOL 1.40 still headlines when adjacent days absent",
+      r["classification"]["detected"] is True)
+
+print("\n=== 13. v2.6 T1: FILE SELECTOR CLIPS THE 3-HOUR TAIL ===")
+_UE = dt.datetime(2024, 6, 4, 6, 0, tzinfo=dt.timezone.utc)   # local midnight
+_US = _UE - dt.timedelta(hours=24)
+def _key(ts):
+    return (f"CONUS/MESH_Max_1440min_00.50/{ts:%Y%m%d}/"
+            f"MRMS_MESH_Max_1440min_00.50_{ts:%Y%m%d-%H%M%S}.grib2.gz")
+_fake_keys = [_key(_UE + dt.timedelta(minutes=m)) for m in (-30, 0, 2, 10, 60, 150)]
+_orig_list = hc._list_day_keys
+hc._list_day_keys = lambda fs, day: [k for k in _fake_keys if f"/{day:%Y%m%d}/" in k or f"_{day:%Y%m%d}-" in k]
+chosen = hc.select_files_for_window(None, _US, _UE, max_files=5)
+hc._list_day_keys = _orig_list
+_times = [hc._parse_ts_from_key(k) for k in chosen]
+check("selector picked at least one end-of-day file", len(chosen) >= 1, str(chosen))
+check("no chosen file more than 20 min past local midnight",
+      all(t <= _UE + dt.timedelta(minutes=20) for t in _times),
+      str([f"{t:%H:%M}" for t in _times]))
+check("no chosen file before local midnight (day-end preferred)",
+      all(t >= _UE for t in _times), str([f"{t:%H:%M}" for t in _times]))
+
+print("\n=== 14. v2.6 T6: WARNINGS KEPT BY OVERLAP, NOT ISSUE TIME ===")
+import storm_context as _sx
+_ws, _we = _US, _UE
+check("issued before the day, active into it -> kept",
+      _sx.event_overlaps(_ws - dt.timedelta(hours=2), _ws + dt.timedelta(minutes=30), _ws, _we))
+check("issued and expired before the day -> dropped",
+      not _sx.event_overlaps(_ws - dt.timedelta(hours=5), _ws - dt.timedelta(hours=4), _ws, _we))
+check("issued after the day ends -> dropped",
+      not _sx.event_overlaps(_we + dt.timedelta(minutes=5), _we + dt.timedelta(hours=1), _ws, _we))
+check("issued inside the day -> kept",
+      _sx.event_overlaps(_ws + dt.timedelta(hours=6), _ws + dt.timedelta(hours=7), _ws, _we))
+
+print("\n=== 15. v2.6 T7: FOOTER VERSION ===")
+r = run("footer26", blob(1.40))
+t = pdf_text(r["pdf_path"])
+check("footer carries methodology v2.6", "methodology v2.6" in t)
 
 print(f"\n{'='*60}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

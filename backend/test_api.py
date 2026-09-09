@@ -59,7 +59,8 @@ j = r.json()
 check("200 + ok", r.status_code == 200 and j.get("ok") is True, str(r.status_code))
 check("detected True", j.get("detected") is True)
 check("has report_url", "/report/" in (j.get("report_url") or ""), j.get("report_url"))
-check("at-property realistic", (j.get("metrics") or {}).get("at_property_in", 0) > 1.0, str(j.get("metrics")))
+check("half-mile metric realistic", (j.get("metrics") or {}).get("half_mile_in", 0) > 1.0, str(j.get("metrics")))
+check("v2.6 T3: at_property_in is gone", "at_property_in" not in (j.get("metrics") or {}), str(j.get("metrics")))
 check("confidence High (radar + ground report)", j.get("confidence") == "High", str(j.get("confidence")))
 check("ground report counted", j.get("n_reports") == 1, str(j.get("n_reports")))
 share_id = j.get("share_id")
@@ -223,6 +224,86 @@ check("snow PDF retrievable", rs.status_code == 200 and rs.content[:4] == b"%PDF
 print("\n[14] bad peril rejected")
 check("unknown peril 400", client.post("/generate", json={"peril": "flood", "manual_lat": 34.5,
       "manual_lon": -101.0, "date": "2024-06-02"}).status_code == 400)
+
+
+print("\n[15] v2.6 T4: spotter-only exceedance is NOT a measured Detected")
+perils.wc.gather_station_gusts = lambda lat, lon, us, ue, n=3: [
+    {"id": "KXYZ", "name": "TEST MUNI", "lat": 34.55, "lon": -101.72, "dist_mi": 3.0,
+     "gust_mph": 40.0, "dir": "NW"}]
+perils.wc.fetch_wind_reports = lambda *a, **k: [
+    {"source": "NWS LSR", "speed_mph": 70, "lat": 34.60, "lon": -101.60, "dist_mi": 12.0,
+     "dir": "NE", "time": "2024-06-02T21:05Z", "kind": "TSTM WND GST"}]
+r = client.post("/generate", json={"peril": "wind", "manual_lat": 34.537, "manual_lon": -101.764,
+                                   "date": "2024-06-05"})
+j = r.json()
+check("wind 200", r.status_code == 200, str(r.status_code))
+check("detected False on spotter-only 70 mph", j.get("detected") is False, str(j.get("detected")))
+check("badge says reported-not-measured", "Reported" in (j.get("badge") or ""), j.get("badge"))
+check("headline says reported nearby", "reported nearby" in (j.get("headline") or ""), j.get("headline"))
+_pdf = client.get(f"/report/{j['share_id']}")
+check("spotter-only PDF renders", _pdf.status_code == 200 and _pdf.content[:4] == b"%PDF")
+import subprocess as _sp2, tempfile as _tf2
+_p = _tf2.mktemp(suffix=".pdf"); open(_p, "wb").write(_pdf.content)
+_txt = _sp2.run(["pdftotext", _p, "-"], capture_output=True, text=True).stdout
+check("PDF does not claim 'was recorded'", "was recorded" not in _txt.lower(), "")
+
+print("\n[16] v2.6 T5: snow nodata is NOT a measured 0.0 / Below Threshold")
+_nod = np.full((80, 80), GEO["nodata"], dtype=">i2")
+perils.sc.fetch_snodas_product = lambda date, code, tmp: scmod.read_snodas_grid(_nod.tobytes(), 80, 80)
+perils.sc.fetch_station_snowfall = lambda *a, **k: []
+r = client.post("/generate", json={"peril": "snow", "manual_lat": CY2, "manual_lon": CX2,
+                                   "date": "2025-01-20"})
+j = r.json()
+check("snow nodata 200", r.status_code == 200, str(r.status_code))
+check("detected is null, not false", j.get("detected") is None, str(j.get("detected")))
+check("headline says unavailable", "unavailable" in (j.get("headline") or "").lower(), j.get("headline"))
+check("no 0.0 depth in headline", "0.0" not in (j.get("headline") or ""), j.get("headline"))
+check("badge = Analysis Unavailable", j.get("badge") == "Analysis Unavailable", j.get("badge"))
+_pdf = client.get(f"/report/{j['share_id']}")
+_p = _tf2.mktemp(suffix=".pdf"); open(_p, "wb").write(_pdf.content)
+_txt = _sp2.run(["pdftotext", _p, "-"], capture_output=True, text=True).stdout
+check("snow PDF does not print Below Threshold", "below threshold" not in _txt.lower(), "")
+check("snow PDF says unavailable", "unavailable" in _txt.lower(), "")
+v_sn, c_sn = emailer.email_verdict({"peril": "snow", "detected": None,
+                                    "badge": "Analysis Unavailable", "coverage": "none"})
+check("snow-unavailable email is grey, not green",
+      c_sn == "#5a6b7e" and "Unavailable" in v_sn, f"{v_sn} {c_sn}")
+
+print("\n[17] v2.6 T4: SPC wind previous-day (12Z) clock")
+import wind_core as wcmod
+import hail_core as hcm
+import datetime as _dt
+_cd = _dt.date(2024, 6, 1)              # previous day's convective file
+_us6 = _dt.datetime(2024, 6, 2, 5, 0, tzinfo=_dt.timezone.utc)
+_ue6 = _us6 + _dt.timedelta(hours=24)
+_csv = ("Time,Speed,Location,County,State,Lat,Lon,Comments\n"
+        "0815,70,2 NE TULIA,SWISHER,TX,34.54,-101.75,measured\n"     # 08:15Z -> early Jun 2 local, inside window
+        "1300,80,FAR,OTHER,TX,34.55,-101.74,previous afternoon\n")   # 13Z on Jun 1 -> outside
+_rep = wcmod.parse_spc_wind_csv(_csv, 34.537, -101.764, 15.0,
+                                convective_day=_cd, utc_start=_us6, utc_end=_ue6)
+check("early-morning row from previous file kept", len(_rep) == 1 and _rep[0]["speed_mph"] == 70,
+      str(_rep))
+check("row time resolved onto the correct calendar day", "2024-06-02T08:15Z" == _rep[0]["time"],
+      str(_rep[0].get("time")))
+
+print("\n[18] v2.6 T7: version + health storage states")
+import pipeline as _pl
+check("methodology v2.6 single source", _pl.METHODOLOGY_VERSION == "v2.6")
+check("perils has no duplicate version constant", not hasattr(perils, "METHODOLOGY_VERSION"))
+import storage as _st
+r = client.get("/health")
+check("health names the storage mode", r.json().get("storage") in ("local", "s3", "ephemeral"),
+      str(r.json()))
+check("REPORTS_DIR set in tests -> not ephemeral", _st.is_ephemeral() is False)
+
+print("\n[19] v2.6 T8: wind email subject never says Hail")
+emailer.email_enabled = lambda: False   # compose path only
+_v, _c = emailer.email_verdict({"peril": "wind", "detected": True, "badge": "Detected"})
+check("wind verdict is wind-worded", "Hail" not in _v, _v)
+_html2 = emailer.build_email_html({"peril": "wind", "detected": True, "badge": "Detected",
+                                   "address": "1 Main St", "date_of_loss": "2024-06-02",
+                                   "headline": "Measured 71 mph at KTUL (1.2 mi)"}, "https://x/r/2")
+check("wind email html says Wind, not Hail", "Wind" in _html2 and "Hail" not in _html2, "")
 
 print("\n================ SUMMARY ================")
 print(f"  {len(PASS)} passed, {len(FAIL)} failed")

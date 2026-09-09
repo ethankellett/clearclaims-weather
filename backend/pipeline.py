@@ -19,7 +19,18 @@ import storm_context as sctx
 
 #  Bumped whenever the numbers on the report change meaning. Printed in the PDF
 #  footer so any archived report can be traced to the logic that produced it.
-METHODOLOGY_VERSION = "v2.5"
+#  SINGLE SOURCE (Ticket 7): perils.py imports this — do not duplicate it.
+METHODOLOGY_VERSION = "v2.6"
+
+
+def version_line() -> str:
+    """Footer identity: methodology version + deployed git SHA when known.
+
+    Render exposes the deployed commit as RENDER_GIT_COMMIT; locally there is
+    none, so the SHA part is simply omitted rather than printing 'UNKNOWN'.
+    """
+    sha = (os.environ.get("RENDER_GIT_COMMIT", "") or "").strip()[:7]
+    return f"methodology {METHODOLOGY_VERSION}" + (f" \u00b7 {sha}" if sha else "")
 
 
 _GEOCODE_LABEL = {"rooftop": "Rooftop", "interpolated": "Address range",
@@ -80,6 +91,7 @@ def generate_report(
     font_dir: str | None = None,
     out_dir: str | None = None,
     _grib_paths: list | None = None,   # test seam: skip S3 if provided
+    _adjacent: dict | None = None,     # test seam: inject DOL-1/DOL+1 samples
     _rqi: dict | None = None,          # test seam: inject an RQI reading
     _context: dict | None = None,      # test seam: inject the PR3 context block
     with_context: bool = True,         # set False to skip the supplement page
@@ -138,9 +150,41 @@ def generate_report(
     half_in = rings[0.5]["in"]
     peak_in = max([v for v in (cell_in, half_in) if v is not None], default=None)
 
-    classification = hc.classify_hail(peak_in, cell_in, threshold_in, coverage["state"])
+    classification = hc.classify_hail(peak_in, threshold_in, coverage["state"])
     detected = bool(classification.get("detected"))
-    at_property_in = peak_in          # kept for the API's existing metrics contract
+
+    # 4a-bis. ADJACENT DAYS (v2.6, D3): sample the day before and the day after
+    # separately so an overnight timing dispute can see them on the page. They
+    # are context rows only — NEVER folded into the finding. Best-effort: a
+    # failed fetch costs the rows, not the report. One file per adjacent day
+    # (its end-of-day 24-h max covers that whole day).
+    if _adjacent is not None:
+        adjacent_days = _adjacent.get("rows", [])
+    elif _grib_paths is not None:
+        adjacent_days = []            # offline test run: nothing to fetch
+    else:
+        adjacent_days = []
+        for _off in (-1, 1):
+            _d = date_of_loss + dt.timedelta(days=_off)
+            if _off == 1 and _d > dt.date.today():
+                continue
+            try:
+                _us, _ue, _ = hc.local_day_utc_window(_d, loc["lat"], loc["lon"])
+                _paths, _, _src = hc.fetch_mesh_paths(_us, _ue, _d, tmpdir, max_files=1)
+                if not _paths:
+                    continue
+                _la, _lo, _mm = hc.max_mesh_over_files(_paths, loc["lat"], loc["lon"],
+                                                       pad_deg=0.30)
+                _r = hc.sample_rings(_la, _lo, _mm, loc["lat"], loc["lon"], rings=(0.5,))
+                adjacent_days.append({
+                    "label": ("Day before" if _off == -1 else "Day after")
+                             + f" ({_d:%b %d})",
+                    "date": str(_d),
+                    "cell": {"in": _r["point"]["in"], "mm": _r["point"]["mm"]},
+                    "half": {"in": _r[0.5]["in"], "mm": _r[0.5]["mm"]},
+                })
+            except Exception:
+                continue
 
     # 4b. ground-truth corroboration + confidence (best-effort; never fatal)
     try:
@@ -185,7 +229,7 @@ def generate_report(
         "reportId": report_id,
         "dateGenerated": f"{generated:%B %d, %Y}",
         "generatedUtc": f"{generated:%Y-%m-%d %H:%M UTC}",
-        "versionLine": f"methodology {METHODOLOGY_VERSION}",
+        "versionLine": version_line(),
         "dateOfLoss": f"{date_of_loss:%B %d, %Y}",
         "propertyAddress": loc["label"],
         "claimRef": claim_ref or "\u2014",
@@ -210,6 +254,7 @@ def generate_report(
             f"shows the search area only."
             if coverage["state"] == "none" else
             f"Estimated hail footprint \u2014 NOAA MRMS MESH, {date_of_loss:%B %d, %Y}."),
+        "adjacentDays": adjacent_days,
         "confidenceLevel": confidence["level"],
         "confidenceColor": confidence["color"],
         "confidenceNote": confidence["note"],
@@ -226,8 +271,8 @@ def generate_report(
         "map_path": map_path,
         "report_id": report_id,
         "detected": detected,
-        "at_property_in": at_property_in,
         "rings": rings,
+        "adjacent_days": adjacent_days,
         "location": loc,
         "tz_name": tz_name,
         "files_used": keys,

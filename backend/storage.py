@@ -16,6 +16,7 @@ import time
 import glob
 
 LOCAL_DIR = os.environ.get("REPORTS_DIR", "/tmp/cc_reports")
+_EXPLICIT_DIR = bool(os.environ.get("REPORTS_DIR", "").strip())
 S3_BUCKET = os.environ.get("STORAGE_S3_BUCKET", "").strip()
 S3_ENDPOINT = os.environ.get("STORAGE_S3_ENDPOINT", "").strip() or None  # R2/B2 need this
 S3_REGION = os.environ.get("STORAGE_S3_REGION", "auto")
@@ -34,6 +35,19 @@ def _s3():
 
 def using_s3() -> bool:
     return bool(S3_BUCKET)
+
+
+def is_ephemeral() -> bool:
+    """True when reports land in /tmp — they will NOT survive a restart."""
+    return not (S3_BUCKET or _EXPLICIT_DIR)
+
+
+if is_ephemeral():                                     # pragma: no cover
+    import sys
+    print("WARNING: neither REPORTS_DIR nor STORAGE_S3_BUCKET is set — report "
+          "PDFs and share links are being written to /tmp and will be LOST on "
+          "every restart or redeploy. Set REPORTS_DIR to a persistent disk.",
+          file=sys.stderr, flush=True)
 
 
 def put_report(report_id: str, pdf_bytes: bytes, meta: dict) -> dict:
