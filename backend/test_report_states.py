@@ -679,8 +679,8 @@ check("finding does not carry 1.75",
 import subprocess as _sp
 _n = _sp.run(["pdfinfo", r["pdf_path"]], capture_output=True, text=True).stdout
 _pages = [l for l in _n.splitlines() if l.startswith("Pages:")]
-check("still two pages with adjacent rows", "2" in (_pages[0] if _pages else ""),
-      _pages[0] if _pages else "?")
+check("adjacent rows do NOT spill to an extra sheet (no-context run stays 1 page)",
+      "1" in (_pages[0] if _pages else ""), _pages[0] if _pages else "?")
 # Reverse case: hail ON the DOL, quiet next morning -> headline keeps the DOL value.
 r = run("dolhail", blob(1.40))
 check("DOL 1.40 still headlines when adjacent days absent",
@@ -721,6 +721,36 @@ print("\n=== 15. v2.6 T7: FOOTER VERSION ===")
 r = run("footer26", blob(1.40))
 t = pdf_text(r["pdf_path"])
 check("footer carries methodology v2.6", "methodology v2.6" in t)
+
+
+print("\n=== 16. v2.6.1: FULL PAGE 1 NEVER SPILLS TO AN EXTRA SHEET ===")
+# The exact live failure (2026-09-09): context page + adjacent-day rows + long
+# corroboration pushed the disclaimer onto a mostly-blank third sheet with a
+# stray "Page 1 of 2" footer. Page 1 must stay ONE sheet with the disclaimer on
+# it, whatever the state.
+_adjfull = {"rows": [
+    {"label": "Day before (Jun 02)", "date": "2024-06-02",
+     "cell": {"in": 0.0, "mm": 0.0}, "half": {"in": 0.0, "mm": 0.0}},
+    {"label": "Day after (Jun 04)", "date": "2024-06-04",
+     "cell": {"in": 1.62, "mm": 41.0}, "half": {"in": 1.75, "mm": 44.0}},
+]}
+for _tag, _peak, _addr in (
+        ("spill_none", 0.0, "1834 RED DALE DR, RAPID CITY, SD, 57702"),
+        ("spill_sig", 3.10, long_addr)):
+    _g = make_grib(blob(_peak), os.path.join(TMP, _tag + ".grib2"))
+    _o = os.path.join(TMP, _tag); os.makedirs(_o, exist_ok=True)
+    _r = pipeline.generate_report(address=_addr, manual_lat=CY, manual_lon=CX,
+                                  date_of_loss=DOL, threshold_in=0.75, out_dir=_o,
+                                  _grib_paths=[_g], _adjacent=_adjfull,
+                                  _rqi={"value": 1.0, "n_files": 2, "source": "test"},
+                                  _context=ctx_sample(n_events=12, warned=True, gust=71.0))
+    _n = subprocess.run(["pdfinfo", _r["pdf_path"]], capture_output=True, text=True).stdout
+    _pg = [l for l in _n.splitlines() if l.startswith("Pages:")]
+    check(f"{_tag}: exactly 2 sheets", "2" in (_pg[0] if _pg else ""), _pg[0] if _pg else "?")
+    _p1 = subprocess.run(["pdftotext", "-l", "1", _r["pdf_path"], "-"],
+                         capture_output=True, text=True).stdout
+    check(f"{_tag}: disclaimer ends on sheet 1", "not affiliated with" in _p1)
+    check(f"{_tag}: sheet 1 labeled Page 1 of 2", "Page 1 of 2" in _p1)
 
 print(f"\n{'='*60}\n  {len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:

@@ -1425,10 +1425,17 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .titleband h1 {{ font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 27px; color: #f0f4f8; letter-spacing: .2px; }}
   .titleband .kick {{ font-size: 12px; font-weight: 500; letter-spacing: .28em; text-transform: uppercase; color: #5a6b7e; }}
 
-  .body {{ display: block; padding: 6px 40px 4px; }}
+  /* Absolutely positioned + clipped: absolute boxes never fragment across
+     pages in WeasyPrint, so the body region can NEVER spawn an extra sheet —
+     worst case it clips above the footer (seen live 2026-09-09: adjacent-day
+     rows + longer methodology spilled the disclaimer onto a mostly-blank
+     extra sheet with a stray footer). Top = header + title band (117px);
+     bottom = footer height (40px). Applies to page 1 and page 2 alike. */
+  .body {{ position: absolute; top: 117px; bottom: 40px; left: 0; right: 0;
+           overflow: hidden; padding: 6px 40px 4px; }}
 
   .meta {{ display: grid; grid-template-columns: 1fr 1fr 1fr; border: 1px solid #dde6f0; border-radius: 9px; overflow: hidden; }}
-  .meta .cell {{ padding: 4px 16px; border-right: 1px solid #e7eef6; border-bottom: 1px solid #e7eef6; min-width: 0; }}
+  .meta .cell {{ padding: 3px 16px; border-right: 1px solid #e7eef6; border-bottom: 1px solid #e7eef6; min-width: 0; }}
   .meta .cell.c3 {{ border-right: none; }}
   .meta .cell.span2 {{ grid-column: span 2; }}
   .meta .cell.row-last {{ border-bottom: none; }}
@@ -1438,7 +1445,7 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
 
   .keyfind {{ margin-top: 6px; display: table; width: 100%; box-sizing: border-box;
     background: {kf_bg}; border: 1px solid {kf_bd}; border-left: 5px solid {kf_accent};
-    border-radius: 10px; padding: 10px 18px; }}
+    border-radius: 10px; padding: 8px 18px; }}
   .kf-cell {{ display: table-cell; vertical-align: middle; }}
   .kf-icon-cell {{ width: 58px; min-width: 58px; }}
   .kf-icon {{ width: 52px; height: 52px; border-radius: 50%; background: {kf_accent};
@@ -1448,7 +1455,7 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   .kf-lbl {{ font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: {kf_accent}; }}
   .keyfind h2 {{ font-family: 'DM Serif Display', serif; font-weight: 400; font-size: 19.5px; line-height: 1.1; color: #06101f; margin-top: 4px; }}
   .keyfind h2 .fig {{ color: {kf_accent}; }}
-  .kf-sub {{ font-size: 12.5px; color: #4a5d76; line-height: 1.4; margin-top: 7px; }}
+  .kf-sub {{ font-size: 12px; color: #4a5d76; line-height: 1.36; margin-top: 5px; }}
   .kf-sub b {{ color: #152742; font-weight: 600; }}
   .kf-note {{ font-size: 10px; color: #6b7d94; line-height: 1.34; margin-top: 4px; }}
   .kf-badge-cell {{ white-space: nowrap; }}
@@ -1457,13 +1464,13 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
 
   .seclbl {{ font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #152742; }}
 
-  .duo {{ margin-top: 6px; display: grid; grid-template-columns: 0.92fr 1.18fr; gap: 26px; align-items: start; }}
+  .duo {{ margin-top: 5px; display: grid; grid-template-columns: 0.92fr 1.18fr; gap: 26px; align-items: start; }}
 
   table {{ width: 100%; border-collapse: collapse; margin-top: 7px; border-radius: 8px; overflow: hidden; }}
   thead th {{ background: #0e2138; color: #f0f4f8; text-align: left; font-size: 9.5px; font-weight: 600;
-    letter-spacing: .08em; text-transform: uppercase; padding: 7px 14px; }}
+    letter-spacing: .08em; text-transform: uppercase; padding: 5px 14px; }}
   thead th.num {{ text-align: right; }}
-  tbody td {{ padding: 4px 14px; font-size: 12.5px; color: #152742; border-bottom: 1px solid #e7eef6; }}
+  tbody td {{ padding: 2.5px 14px; font-size: 12px; color: #152742; border-bottom: 1px solid #e7eef6; }}
   tbody td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
   tbody tr:nth-child(even) {{ background: #f4f8fc; }}
   tbody tr.hot {{ background: {kf_bg}; }}
@@ -1471,26 +1478,26 @@ _HAIL_REPORT_TEMPLATE = """<!DOCTYPE html>
   tbody tr.hot td:first-child {{ box-shadow: inset 3px 0 0 {kf_accent}; }}
   tbody tr.hot td.num {{ color: {kf_accent}; }}
   tbody tr:last-child td {{ border-bottom: none; }}
-  .cap {{ font-size: 9px; color: #8a99ab; line-height: 1.4; margin-top: 6px; }}
+  .cap {{ font-size: 9px; color: #8a99ab; line-height: 1.3; margin-top: 5px; }}
 
   .map-wrap img {{ width: 100%; height: 163px; object-fit: contain; object-position: center; display: block;
     border: 1px solid #dde6f0; border-radius: 8px; background: #ffffff; }}
 
-  .conf {{ margin-top: 6px; border: 1px solid #dde6f0; border-radius: 10px; padding: 7px 18px;
+  .conf {{ margin-top: 5px; border: 1px solid #dde6f0; border-radius: 10px; padding: 6px 18px;
     display: flex; align-items: center; gap: 20px; }}
   .conf .chip {{ flex: 0 0 auto; color: #fff; font-size: 11px; font-weight: 700; letter-spacing: .1em;
     text-transform: uppercase; padding: 11px 16px; border-radius: 8px; }}
   .conf .conf-body .seclbl {{ margin-bottom: 6px; }}
-  .conf .conf-body p {{ font-size: 11.5px; color: #4a5d76; line-height: 1.42; }}
+  .conf .conf-body p {{ font-size: 11px; color: #4a5d76; line-height: 1.36; }}
   .conf .conf-body p + p {{ margin-top: 5px; }}
 
-  .method {{ margin-top: 5px; }}
-  .method p {{ font-size: 10.5px; color: #4a5d76; line-height: 1.38; margin-top: 3px; }}
+  .method {{ margin-top: 4px; }}
+  .method p {{ font-size: 9.5px; color: #4a5d76; line-height: 1.32; margin-top: 3px; }}
   .method p.mesh-disc {{ color: #152742; font-weight: 600; }}
 
-  .disc {{ margin-top: 5px; background: #f0f4f8; border-radius: 8px; padding: 6px 16px; margin-bottom: 44px; }}
+  .disc {{ margin-top: 4px; background: #f0f4f8; border-radius: 8px; padding: 5px 16px; }}
   .disc .dl {{ font-size: 9px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: #8a99ab; margin-bottom: 5px; }}
-  .disc p {{ font-size: 8.5px; color: #8a99ab; line-height: 1.38; }}
+  .disc p {{ font-size: 8.5px; color: #8a99ab; line-height: 1.3; }}
   .disc b, .disc strong {{ color: #5a6b7e; }}
 
   .spacer {{ display: none; }}
@@ -1936,7 +1943,7 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
              ("Peak within 5 miles", res["mile5"], False)]
     # Adjacent days (D3): shown for timing context, never part of the finding.
     for _adj in (data.get("adjacentDays") or []):
-        _rows.append((f'{_adj["label"]} \u2014 peak \u00bd mi', _adj.get("half") or {}, False))
+        _rows.append((f'{_adj["label"]} \u2014 \u00bd mi', _adj.get("half") or {}, False))
     est_rows = "".join(
         '<tr class="{c}"><td>{l}</td><td class="num">{i}</td><td class="num">{m}</td></tr>'.format(
             c="hot" if hot else "", l=label,
@@ -1954,8 +1961,9 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
             "average, and not a measurement at the address. The MRMS grid is &asymp;1 km, so "
             "&lsquo;nearest grid cell&rsquo; already covers roughly a city block. A larger "
             "radius can only ever report the same value or a bigger one."
-            + (" Adjacent-day rows are timing context only and are NOT part of this "
-               "report&rsquo;s finding." if data.get("adjacentDays") else ""))
+            + (" Adjacent-day rows are that day&rsquo;s \u00bd-mile peak \u2014 timing "
+               "context only, NOT part of this report&rsquo;s finding."
+               if data.get("adjacentDays") else ""))
 
     # ---- Confidence chip: suppressed entirely when coverage is unusable ---
     _conf_level = data.get("confidenceLevel") or ""
@@ -1977,10 +1985,9 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
         "Maximum Estimated Size of Hail (MESH) product &mdash; a single-polarisation radar "
         "algorithm that infers in-storm hail growth from reflectivity above a modelled "
         "freezing level. This report reads the 24-hour maximum field (MESH_Max_1440min) "
-        "stamped at the end of the property&rsquo;s local calendar day (within minutes of "
-        "local midnight), so its window matches that day; adjacent days are sampled "
-        "separately and are never folded into this report&rsquo;s finding. Ground reports "
-        "are clipped to the same local-day window. Radar coverage quality is NOAA&rsquo;s "
+        "stamped at the end of the property&rsquo;s local calendar day, so its window "
+        "matches that day; adjacent days are shown separately and never enter the "
+        "finding. Ground reports use the same local-day window. Radar coverage quality is NOAA&rsquo;s "
         "Radar Quality Index (0&ndash;1, from terrain-blockage maps and beam height) &mdash; "
         "an indicator of whether the radar could see this point, not a hail-specific score.")
     methodology = data.get("methodologyText", _method_default)
@@ -2007,7 +2014,7 @@ def build_report_html(data: dict, font_dir: str | None = None) -> str:
         generated_utc=data.get("generatedUtc", data["dateGenerated"]),
         version_line=data.get("versionLine", "methodology v2"),
         date_of_loss=data["dateOfLoss"],
-        address=soft_wrap_html(clip_text(data["propertyAddress"], 110)),
+        address=soft_wrap_html(clip_text(data["propertyAddress"], 84)),
         claim_ref=clip_text(data["claimRef"], 28),
         coords=data["coordinates"],
         radar_quality=data.get("radarQuality", "Not assessed"),
